@@ -12,7 +12,7 @@ Quy tắc:
 - Không hỏi và không thu thập thông tin cá nhân của học sinh.`;
 
 export default async function handler(req, res) {
-  res.setHeader("Access-Control-Allow-Origin", "https://github.com/thanhtan1302-dev/vutrutoanhoc.git");
+  res.setHeader("Access-Control-Allow-Origin", "https://thanhtan1302-dev.github.io/vutrutoanhoc/");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
   if (req.method === "OPTIONS") return res.status(204).end();
