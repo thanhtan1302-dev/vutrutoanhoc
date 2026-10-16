@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Grade, Lesson } from '../types/mathverse';
 import { useMathVerse } from '../context/MathVerseContext';
 import { CURRICULUM_DATA } from '../data/curriculumData';
@@ -37,6 +37,13 @@ export const CurriculumView: React.FC = () => {
   const [selectedTopicFilter, setSelectedTopicFilter] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [activeModalLesson, setActiveModalLesson] = useState<Lesson | null>(null);
+
+  // Đồng bộ tab khối lớp hiển thị khi người dùng đổi khối lớp từ thanh Navbar
+  useEffect(() => {
+    if (user?.grade) {
+      setActiveGradeTab(user.grade);
+    }
+  }, [user?.grade]);
 
   // Filter lessons by grade
   const gradeLessons = CURRICULUM_DATA.filter((l) => l.grade === activeGradeTab);
