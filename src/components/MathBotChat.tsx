@@ -110,7 +110,7 @@ export const MathBotChat: React.FC = () => {
       try {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 10000);
-        const endpoint = (import.meta as any).env?.VITE_MATHBOT_URL || '/api/mathbot';
+        const endpoint = (import.meta as any).env?.VITE_MATHBOT_URL || 'https://vutrutoanhoc.vercel.app/api/mathbot';
         const response = await fetch(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
