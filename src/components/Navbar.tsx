@@ -234,7 +234,7 @@ export const Navbar: React.FC = () => {
       {/* New Badge Unlocked Modal / Toast */}
       {newBadgeUnlocked && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in">
-          <div className="w-full max-w-sm bg-gradient-to-b from-indigo-950 to-slate-900 border border-cyan-500/40 rounded-3xl p-6 text-center shadow-2xl shadow-cyan-500/30">
+          <div className="relative w-full max-w-sm bg-gradient-to-b from-indigo-950 to-slate-900 border border-cyan-500/40 rounded-3xl p-6 text-center shadow-2xl shadow-cyan-500/30">
             <div className="text-5xl mb-3 animate-bounce">🏆</div>
             <h3 className="text-xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-amber-300 to-yellow-400">
               Huy hiệu mới mở khóa!
@@ -244,8 +244,11 @@ export const Navbar: React.FC = () => {
               Tuyệt vời lắm! Em đã nhận thêm điểm thưởng và ghi danh trong vũ trụ MathVerse.
             </p>
             <button
-              onClick={clearNewBadge}
-              className="mt-5 w-full py-2.5 px-4 bg-gradient-to-r from-cyan-500 to-indigo-600 hover:from-cyan-400 hover:to-indigo-500 text-white font-bold rounded-xl text-sm transition-transform cursor-pointer"
+              onClick={() => {
+                soundManager.playClickSound();
+                clearNewBadge();
+              }}
+              className="mt-5 w-full py-2.5 px-4 bg-gradient-to-r from-cyan-500 to-indigo-600 hover:from-cyan-400 hover:to-indigo-500 text-white font-bold rounded-xl text-sm transition-transform cursor-pointer shadow-lg shadow-indigo-600/30 active:scale-95"
             >
               Nhận phần thưởng
             </button>

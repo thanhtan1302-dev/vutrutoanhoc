@@ -293,6 +293,7 @@ export const MathVerseProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         xp: cloudTotalXp,
         topicStats: cloudTopicStats,
         recentMistakes: cloudMistakes,
+        unlockedBadges: prev?.unlockedBadges || [],
         unlockedGrades: prev?.unlockedGrades || [6],
         completedGradeExams: prev?.completedGradeExams || {},
       };
@@ -310,7 +311,8 @@ export const MathVerseProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         console.warn('Lỗi phân tích năng lực khi đồng bộ Supabase:', e);
       }
 
-      return checkBadgeUnlocks(updated);
+      // Không hiển thị lại popup mở khóa huy hiệu khi đồng bộ lại dữ liệu ban đầu
+      return checkBadgeUnlocks(updated, false);
     });
   };
 
@@ -326,22 +328,53 @@ export const MathVerseProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     }
   }, [user]);
 
+  // Helper đọc và ghi nhận các huy hiệu đã hiển thị popup, tránh lặp lại nhiều lần
+  const getSeenBadges = (userId?: string): Set<string> => {
+    try {
+      const key = `mathverse_seen_badges_${userId || 'guest'}`;
+      const raw = localStorage.getItem(key);
+      if (raw) return new Set(JSON.parse(raw));
+    } catch {
+      // Ignore
+    }
+    return new Set<string>();
+  };
+
+  const markBadgeAsSeen = (badgeId: string, userId?: string) => {
+    try {
+      const key = `mathverse_seen_badges_${userId || 'guest'}`;
+      const seen = getSeenBadges(userId);
+      seen.add(badgeId);
+      localStorage.setItem(key, JSON.stringify(Array.from(seen)));
+    } catch {
+      // Ignore
+    }
+  };
+
   // Kiểm tra huy hiệu khi điểm và tiến độ tăng
-  const checkBadgeUnlocks = (updatedUser: UserProfile): UserProfile => {
-    let newlyUnlocked: string[] = [];
-    const currentBadges = new Set(updatedUser.unlockedBadges);
+  // Tham số notify = false khi đồng bộ dữ liệu nền, tránh bắn popup liên tục
+  const checkBadgeUnlocks = (updatedUser: UserProfile, notify = true): UserProfile => {
+    let newlyUnlocked: { id: string; title: string }[] = [];
+    const currentBadges = new Set(updatedUser.unlockedBadges || []);
+    const seenBadges = getSeenBadges(updatedUser.id);
 
     BADGES_DATA.forEach((badge) => {
-      if (!currentBadges.has(badge.id)) {
-        if (badge.checkUnlocked(updatedUser)) {
+      const isMet = badge.checkUnlocked(updatedUser);
+      if (isMet) {
+        if (!currentBadges.has(badge.id)) {
           currentBadges.add(badge.id);
-          newlyUnlocked.push(badge.title);
+          // Chỉ thêm vào danh sách hiển thị popup nếu chưa từng thông báo cho người dùng
+          if (!seenBadges.has(badge.id)) {
+            newlyUnlocked.push({ id: badge.id, title: badge.title });
+          }
         }
       }
     });
 
-    if (newlyUnlocked.length > 0) {
-      setNewBadgeUnlocked(newlyUnlocked[0]);
+    if (notify && newlyUnlocked.length > 0) {
+      const firstBadge = newlyUnlocked[0];
+      setNewBadgeUnlocked(firstBadge.title);
+      markBadgeAsSeen(firstBadge.id, updatedUser.id);
       soundManager.triggerBigCelebration();
     }
 
@@ -715,6 +748,7 @@ export const MathVerseProvider: React.FC<{ children: React.ReactNode }> = ({ chi
             xp: Math.max(prev.xp, cloudTotalXp),
             topicStats: cloudTopicStats,
             recentMistakes: cloudMistakes.length > 0 ? cloudMistakes : (prev.recentMistakes || []),
+            unlockedBadges: prev.unlockedBadges || [],
           };
 
           try {
@@ -729,7 +763,7 @@ export const MathVerseProvider: React.FC<{ children: React.ReactNode }> = ({ chi
             console.warn('Lỗi phân tích năng lực khi làm mới đám mây:', e);
           }
 
-          return checkBadgeUnlocks(updated);
+          return checkBadgeUnlocks(updated, false);
         });
       }
     } catch (e) {
@@ -943,6 +977,12 @@ export const MathVerseProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   };
 
   const clearNewBadge = () => {
+    if (newBadgeUnlocked) {
+      const found = BADGES_DATA.find((b) => b.title === newBadgeUnlocked);
+      if (found) {
+        markBadgeAsSeen(found.id, user?.id);
+      }
+    }
     setNewBadgeUnlocked(null);
   };
 

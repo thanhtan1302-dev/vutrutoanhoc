@@ -15,7 +15,6 @@ import { SettingsModal } from './components/SettingsModal';
 import { MusicPlayerWidget } from './components/MusicPlayerWidget';
 import { GradePromotionModal } from './components/GradePromotionModal';
 import { GradePromotionQuiz } from './components/GradePromotionQuiz';
-import { AIEvaluationView } from './components/AIEvaluationView';
 import { UserFeedbackAnalyticsView } from './components/UserFeedbackAnalyticsView';
 import { WeeklySurveyModal } from './components/WeeklySurveyModal';
 import { shouldShowWeeklySurveyPrompt } from './utils/userFeedbackSurveyManager';
@@ -29,7 +28,6 @@ import {
   RotateCcw,
   Award,
   BarChart3,
-  ShieldCheck,
   MessageSquareHeart,
 } from 'lucide-react';
 import { soundManager } from './utils/soundEffects';
@@ -78,7 +76,6 @@ const MainAppContent: React.FC = () => {
     { id: 'challenges', label: 'Thử thách', icon: Target },
     { id: 'mathbot', label: 'MathBot AI', icon: Bot },
     { id: 'smart_review', label: 'Ôn tập', icon: RotateCcw },
-    { id: 'ai_eval', label: 'Đánh giá AI', icon: ShieldCheck },
     { id: 'feedback_analytics', label: 'Ý kiến HS', icon: MessageSquareHeart },
     { id: 'achievements', label: 'Thành tích', icon: Award },
     { id: 'analytics', label: 'Tiến độ', icon: BarChart3 },
@@ -134,7 +131,6 @@ const MainAppContent: React.FC = () => {
         {activeTab === 'challenges' && <ChallengesMode />}
         {activeTab === 'mathbot' && <MathBotChat />}
         {activeTab === 'smart_review' && <SmartReviewMode />}
-        {activeTab === 'ai_eval' && <AIEvaluationView />}
         {activeTab === 'feedback_analytics' && <UserFeedbackAnalyticsView />}
         {activeTab === 'achievements' && <AchievementsView />}
         {activeTab === 'analytics' && <ProgressAnalyticsView />}

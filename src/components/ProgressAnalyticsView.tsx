@@ -973,17 +973,6 @@ export const ProgressAnalyticsView: React.FC = () => {
 
           <div className="flex flex-wrap items-center gap-2">
             <button
-              onClick={() => {
-                setActiveTab('ai_eval');
-                soundManager.playClickSound();
-              }}
-              className="px-3 py-1.5 rounded-xl bg-purple-600/30 hover:bg-purple-600/50 border border-purple-500/50 text-purple-200 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
-              title="Đánh giá độ chính xác tự động trên bộ 20 bài toán Lớp 6"
-            >
-              <ShieldCheck className="w-3.5 h-3.5 text-purple-300" />
-              <span>AI Evaluation (20 câu)</span>
-            </button>
-            <button
               onClick={handleExportJson}
               className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
               title="Xuất file JSON phục vụ hội đồng chấm thi"
