@@ -423,8 +423,42 @@ export const SettingsModal: React.FC = () => {
         {/* Danger Zone: Reset & Logout */}
         <div className="pt-6 border-t border-slate-800 space-y-4">
           <h3 className="text-sm font-bold text-slate-300 uppercase tracking-wider">
-            Quản trị dữ liệu
+            Tài khoản & Quản trị dữ liệu
           </h3>
+
+          {/* Supabase Account Info */}
+          <div className="p-4 rounded-2xl bg-slate-950/80 border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <div className="text-xs text-slate-400">Trạng thái đồng bộ Supabase Cloud:</div>
+              <div className="text-sm font-bold text-white mt-0.5 flex items-center gap-1.5">
+                {user.isSupabaseAuth ? (
+                  <>
+                    <span className="w-2 h-2 rounded-full bg-emerald-400" />
+                    <span>Đã đăng nhập: {user.email || user.name}</span>
+                  </>
+                ) : (
+                  <>
+                    <span className="w-2 h-2 rounded-full bg-amber-400" />
+                    <span>Chế độ Khách (Dữ liệu lưu tạm trên máy này)</span>
+                  </>
+                )}
+              </div>
+              {user.id && (
+                <div className="text-[11px] font-mono text-slate-500 mt-0.5">
+                  User ID: {user.id}
+                </div>
+              )}
+            </div>
+
+            <button
+              type="button"
+              onClick={logout}
+              className="px-4 py-2 rounded-xl bg-slate-900 border border-slate-700 hover:border-slate-600 text-slate-300 hover:text-white text-xs font-semibold flex items-center justify-center gap-2 transition-colors cursor-pointer self-start sm:self-auto"
+            >
+              <LogOut className="w-4 h-4 text-rose-400" />
+              <span>Đăng xuất tài khoản</span>
+            </button>
+          </div>
 
           <div className="flex flex-col sm:flex-row gap-3">
             {!confirmReset ? (

@@ -84,6 +84,9 @@ export interface MistakeRecord {
 }
 
 export interface UserProfile {
+  id?: string; // Supabase Auth User ID
+  email?: string;
+  isSupabaseAuth?: boolean;
   name: string;
   grade: Grade;
   avatar: string;

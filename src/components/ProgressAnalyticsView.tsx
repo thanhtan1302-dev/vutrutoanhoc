@@ -26,6 +26,15 @@ import {
   RotateCcw,
   MessageSquareHeart,
   Star,
+  Database,
+  Cloud,
+  Play,
+  Eye,
+  FileCheck2,
+  X,
+  History,
+  CloudOff,
+  CloudCheck,
 } from 'lucide-react';
 import {
   getAIFeedbackStats,
@@ -40,6 +49,13 @@ import {
   RoadmapStep,
 } from '../utils/competencyAnalyzer';
 import { soundManager } from '../utils/soundEffects';
+import {
+  fetchLearningResults,
+  fetchActiveInProgress,
+  LearningResult,
+  LearningProgress,
+  isSupabaseConfigured,
+} from '../lib/supabaseClient';
 
 export const ProgressAnalyticsView: React.FC = () => {
   const {
@@ -48,6 +64,16 @@ export const ProgressAnalyticsView: React.FC = () => {
     setSelectedLessonId,
     setSelectedPracticeTopic,
   } = useMathVerse();
+
+  // Sub-tabs: 'cloud_profile' (Hồ sơ Supabase) | 'ai_competency' (Adaptive AI)
+  const [activeSubTab, setActiveSubTab] = useState<'cloud_profile' | 'ai_competency'>('cloud_profile');
+
+  // Supabase Cloud Data States
+  const [cloudResults, setCloudResults] = useState<LearningResult[]>([]);
+  const [cloudInProgress, setCloudInProgress] = useState<LearningProgress[]>([]);
+  const [cloudLoading, setCloudLoading] = useState<boolean>(false);
+  const [cloudError, setCloudError] = useState<string | null>(null);
+  const [viewingResult, setViewingResult] = useState<LearningResult | null>(null);
 
   // AI Feedback Stats state (Hội thi AI 2026)
   const [aiStats, setAiStats] = useState<AIFeedbackStats>(() => getAIFeedbackStats());
@@ -61,6 +87,33 @@ export const ProgressAnalyticsView: React.FC = () => {
     return stored || analyzeStudentCompetency(user);
   });
   const [isRefreshing, setIsRefreshing] = useState(false);
+
+  // Tải dữ liệu từ Supabase Cloud khi người dùng đăng nhập
+  const loadCloudData = async () => {
+    if (!user?.id || !isSupabaseConfigured()) return;
+    setCloudLoading(true);
+    setCloudError(null);
+    try {
+      const [resResults, resProgress] = await Promise.all([
+        fetchLearningResults(user.id),
+        fetchActiveInProgress(user.id),
+      ]);
+      if (resResults.error) throw resResults.error;
+      if (resProgress.error) throw resProgress.error;
+      setCloudResults(resResults.data);
+      setCloudInProgress(resProgress.data);
+    } catch (err: any) {
+      setCloudError(err.message || 'Lỗi khi kết nối đến Supabase Cloud.');
+    } finally {
+      setCloudLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (user?.isSupabaseAuth && user?.id) {
+      loadCloudData();
+    }
+  }, [user?.id, user?.isSupabaseAuth]);
 
   useEffect(() => {
     // Tự động phân tích khi user thay đổi hoặc nhận event
@@ -226,6 +279,229 @@ export const ProgressAnalyticsView: React.FC = () => {
             {estimatedHours}h
           </div>
           <div className="text-[11px] text-slate-400">Khoảng {estimatedMins} phút</div>
+        </div>
+      </div>
+
+      {/* ========================================================================= */}
+      {/* 1. HỒ SƠ HỌC TẬP & TIẾN ĐỘ CLOUD (SUPABASE POSTGRESQL + AUTH) */}
+      {/* ========================================================================= */}
+      <div className="p-6 sm:p-8 rounded-3xl bg-slate-900 border border-slate-800 shadow-xl space-y-6">
+        {/* Header Hồ Sơ Cloud */}
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-800">
+          <div className="flex items-center gap-3">
+            <div className="w-11 h-11 rounded-2xl bg-cyan-600/20 border border-cyan-400/40 flex items-center justify-center text-cyan-300 shadow-lg shadow-cyan-600/10">
+              <Database className="w-6 h-6" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h2 className="text-lg sm:text-xl font-bold text-white">
+                  Hồ sơ Học tập Supabase Cloud
+                </h2>
+                {user.isSupabaseAuth ? (
+                  <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-[10px] font-bold flex items-center gap-1">
+                    <CloudCheck className="w-3 h-3" /> Đã kết nối Cloud
+                  </span>
+                ) : (
+                  <span className="px-2 py-0.5 rounded-full bg-amber-500/20 border border-amber-500/40 text-amber-300 text-[10px] font-bold flex items-center gap-1">
+                    <CloudOff className="w-3 h-3" /> Khách / Chưa đăng nhập Supabase
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-slate-400 mt-0.5">
+                {user.email ? `Tài khoản: ${user.email} • ID: ${user.id?.slice(0, 8)}...` : 'Lưu trữ tiến độ làm dở và bảng điểm hoàn thành trên PostgreSQL RLS.'}
+              </p>
+            </div>
+          </div>
+
+          <button
+            onClick={() => {
+              soundManager.playClickSound();
+              loadCloudData();
+            }}
+            disabled={cloudLoading || !user.isSupabaseAuth}
+            className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-2 transition-colors cursor-pointer disabled:opacity-40"
+          >
+            <RotateCw className={`w-3.5 h-3.5 text-cyan-400 ${cloudLoading ? 'animate-spin' : ''}`} />
+            <span>{cloudLoading ? 'Đang đồng bộ...' : 'Đồng bộ đám mây'}</span>
+          </button>
+        </div>
+
+        {/* Lỗi kết nối Supabase nếu có */}
+        {cloudError && (
+          <div className="p-4 rounded-2xl bg-rose-950/40 border border-rose-500/40 text-rose-300 text-xs flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+              <span>{cloudError}</span>
+            </div>
+            <button
+              onClick={loadCloudData}
+              className="px-3 py-1 rounded-lg bg-rose-600 text-white font-bold text-xs cursor-pointer hover:bg-rose-500"
+            >
+              Thử lại
+            </button>
+          </div>
+        )}
+
+        {/* MỤC 1.1: TIẾN ĐỘ CÁC BÀI ĐANG LÀM DỞ (learning_progress) */}
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-bold text-white flex items-center gap-2">
+              <History className="w-4 h-4 text-cyan-400" />
+              <span>Bài học đang làm dở (Chưa hoàn thành)</span>
+            </h3>
+            <span className="text-xs text-slate-400">
+              {cloudInProgress.length} bài đang dở
+            </span>
+          </div>
+
+          {cloudLoading && cloudInProgress.length === 0 ? (
+            <div className="p-6 rounded-2xl bg-slate-950/60 border border-slate-800/80 text-center text-xs text-slate-400 flex items-center justify-center gap-2">
+              <RotateCw className="w-4 h-4 animate-spin text-cyan-400" />
+              <span>Đang tải tiến độ từ Supabase Cloud...</span>
+            </div>
+          ) : cloudInProgress.length > 0 ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {cloudInProgress.map((item) => (
+                <div
+                  key={item.lesson_id}
+                  className="p-4 rounded-2xl bg-slate-950/80 border border-slate-800/80 hover:border-slate-700 transition-all flex flex-col justify-between gap-3"
+                >
+                  <div>
+                    <div className="flex items-center justify-between text-xs mb-1">
+                      <span className="font-bold text-cyan-300 truncate max-w-[200px]">
+                        Lớp {item.grade_level} • {item.topic}
+                      </span>
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-mono bg-cyan-500/10 text-cyan-300 border border-cyan-500/30">
+                        {item.progress_percent}%
+                      </span>
+                    </div>
+                    <div className="text-sm font-bold text-white line-clamp-1">
+                      {item.lesson_title}
+                    </div>
+                    <div className="text-[11px] text-slate-400 mt-1">
+                      Đã làm đến câu {item.current_question + 1}
+                    </div>
+                    {/* Progress Bar */}
+                    <div className="w-full h-1.5 bg-slate-800 rounded-full mt-2.5 overflow-hidden">
+                      <div
+                        className="h-full bg-gradient-to-r from-cyan-400 to-indigo-500 rounded-full"
+                        style={{ width: `${item.progress_percent}%` }}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between pt-2 border-t border-slate-800/60 text-xs">
+                    <span className="text-[10px] text-slate-500">
+                      {item.updated_at ? new Date(item.updated_at).toLocaleDateString('vi-VN') : 'Gần đây'}
+                    </span>
+                    <button
+                      onClick={() => {
+                        soundManager.playClickSound();
+                        setSelectedLessonId(item.lesson_id);
+                        setActiveTab('practice');
+                      }}
+                      className="px-3 py-1 rounded-lg bg-gradient-to-r from-cyan-500 to-indigo-600 hover:from-cyan-400 hover:to-indigo-500 text-white font-bold text-xs flex items-center gap-1 cursor-pointer transition-transform active:scale-95 shadow-sm"
+                    >
+                      <Play className="w-3 h-3 fill-current" />
+                      <span>Học tiếp</span>
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="p-6 rounded-2xl bg-slate-950/40 border border-slate-800/60 text-center text-xs text-slate-400">
+              Không có bài học nào đang làm dở. Mọi bài em bắt đầu đều đã hoàn tất hoặc chưa làm.
+            </div>
+          )}
+        </div>
+
+        {/* MỤC 1.2: LỊCH SỬ CÁC BÀI ĐÃ HOÀN THÀNH (learning_results) */}
+        <div className="space-y-3 pt-2">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-bold text-white flex items-center gap-2">
+              <FileCheck2 className="w-4 h-4 text-emerald-400" />
+              <span>Lịch sử các bài đã hoàn thành (Supabase Records)</span>
+            </h3>
+            <span className="text-xs text-slate-400">
+              {cloudResults.length} bài hoàn thành
+            </span>
+          </div>
+
+          {cloudLoading && cloudResults.length === 0 ? (
+            <div className="p-6 rounded-2xl bg-slate-950/60 border border-slate-800/80 text-center text-xs text-slate-400 flex items-center justify-center gap-2">
+              <RotateCw className="w-4 h-4 animate-spin text-cyan-400" />
+              <span>Đang tải lịch sử điểm từ Supabase...</span>
+            </div>
+          ) : cloudResults.length > 0 ? (
+            <div className="space-y-2.5">
+              {cloudResults.slice(0, 10).map((res, idx) => (
+                <div
+                  key={res.id || idx}
+                  className="p-3.5 rounded-2xl bg-slate-950/70 border border-slate-800 hover:border-slate-700 flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-colors"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="w-9 h-9 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 font-bold shrink-0 text-sm font-mono">
+                      {res.score}
+                    </div>
+                    <div>
+                      <div className="text-sm font-bold text-white line-clamp-1">
+                        {res.lesson_title}
+                      </div>
+                      <div className="text-[11px] text-slate-400 flex items-center gap-2 mt-0.5">
+                        <span>Lớp {res.grade_level} • {res.topic}</span>
+                        <span>•</span>
+                        <span className="text-emerald-400">{res.correct_count} đúng</span>
+                        {res.wrong_count > 0 && <span className="text-rose-400">• {res.wrong_count} sai</span>}
+                        <span>•</span>
+                        <span>{res.completed_at ? new Date(res.completed_at).toLocaleDateString('vi-VN') : ''}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 self-end sm:self-auto">
+                    <button
+                      onClick={() => {
+                        soundManager.playClickSound();
+                        setViewingResult(res);
+                      }}
+                      className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-colors"
+                    >
+                      <Eye className="w-3.5 h-3.5 text-cyan-400" />
+                      <span>Xem kết quả</span>
+                    </button>
+                    <button
+                      onClick={() => {
+                        soundManager.playClickSound();
+                        setSelectedLessonId(res.lesson_id);
+                        setActiveTab('practice');
+                      }}
+                      className="px-3 py-1.5 rounded-lg bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-300 text-xs font-semibold flex items-center gap-1 cursor-pointer transition-colors"
+                    >
+                      <RotateCcw className="w-3 h-3" />
+                      <span>Luyện lại</span>
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="p-8 rounded-2xl bg-slate-950/40 border border-slate-800/60 text-center space-y-2">
+              <p className="text-xs text-slate-400">
+                Chưa có bài học nào được ghi nhận trên Supabase Cloud.
+              </p>
+              <button
+                onClick={() => {
+                  soundManager.playClickSound();
+                  setActiveTab('lessons');
+                }}
+                className="px-4 py-2 rounded-xl bg-gradient-to-r from-cyan-500 to-indigo-600 text-white font-bold text-xs cursor-pointer shadow-md inline-flex items-center gap-1.5"
+              >
+                <BookOpen className="w-3.5 h-3.5" />
+                <span>Bắt đầu bài học đầu tiên</span>
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
@@ -835,6 +1111,91 @@ export const ProgressAnalyticsView: React.FC = () => {
           ))}
         </div>
       </div>
+
+      {/* MODAL XEM CHI TIẾT KẾT QUẢ BÀI HỌC (SUPABASE RECORD) */}
+      {viewingResult && (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in">
+          <div className="relative w-full max-w-md bg-slate-900 border border-slate-800 rounded-3xl p-6 shadow-2xl space-y-5">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <span className="text-[11px] font-bold text-cyan-400 uppercase tracking-wider">
+                  Chi tiết kết quả Supabase
+                </span>
+                <h3 className="text-base sm:text-lg font-bold text-white mt-0.5">
+                  {viewingResult.lesson_title}
+                </h3>
+                <p className="text-xs text-slate-400">
+                  Lớp {viewingResult.grade_level} • {viewingResult.topic}
+                </p>
+              </div>
+              <button
+                onClick={() => setViewingResult(null)}
+                className="p-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-3 gap-2.5 p-4 rounded-2xl bg-slate-950 border border-slate-800 text-center">
+              <div>
+                <div className="text-xs text-slate-400">Điểm số</div>
+                <div className="text-xl font-bold text-cyan-400 font-mono mt-0.5">
+                  {viewingResult.score}/10
+                </div>
+              </div>
+              <div className="border-x border-slate-800">
+                <div className="text-xs text-slate-400">Đúng / Sai</div>
+                <div className="text-xl font-bold text-emerald-400 font-mono mt-0.5">
+                  {viewingResult.correct_count}/{viewingResult.wrong_count}
+                </div>
+              </div>
+              <div>
+                <div className="text-xs text-slate-400">Hoàn thành</div>
+                <div className="text-xl font-bold text-purple-400 font-mono mt-0.5">
+                  {viewingResult.completion_percent}%
+                </div>
+              </div>
+            </div>
+
+            <div className="text-xs text-slate-400 space-y-1">
+              <div>
+                Ngày hoàn thành:{' '}
+                <strong className="text-slate-200">
+                  {viewingResult.completed_at
+                    ? new Date(viewingResult.completed_at).toLocaleString('vi-VN')
+                    : 'N/A'}
+                </strong>
+              </div>
+              <div>
+                Mã bản ghi (ID):{' '}
+                <span className="font-mono text-[11px] text-slate-500">
+                  {viewingResult.id || 'N/A'}
+                </span>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+              <button
+                onClick={() => setViewingResult(null)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold cursor-pointer"
+              >
+                Đóng
+              </button>
+              <button
+                onClick={() => {
+                  setViewingResult(null);
+                  setSelectedLessonId(viewingResult.lesson_id);
+                  setActiveTab('practice');
+                }}
+                className="px-4 py-2 rounded-xl bg-gradient-to-r from-cyan-500 to-indigo-600 text-white font-bold text-xs cursor-pointer flex items-center gap-1.5 shadow-md"
+              >
+                <Play className="w-3.5 h-3.5 fill-current" />
+                <span>Luyện tập lại bài này</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

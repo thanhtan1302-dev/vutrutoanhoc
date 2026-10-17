@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Question } from '../types/mathverse';
 import { useMathVerse } from '../context/MathVerseContext';
 import { QUESTIONS_DATA } from '../data/questionsData';
@@ -15,9 +15,22 @@ import {
   Check,
   ChevronRight,
   Filter,
+  Cloud,
+  CloudOff,
+  CloudCheck,
+  RefreshCw,
+  Trophy,
+  History,
+  BookOpen,
 } from 'lucide-react';
 import { soundManager } from '../utils/soundEffects';
 import { formatMathNotation } from '../utils/formatMath';
+import {
+  isSupabaseConfigured,
+  saveLearningProgress,
+  fetchLessonProgress,
+  saveLearningResult,
+} from '../lib/supabaseClient';
 
 export const PracticeMode: React.FC = () => {
   const {
@@ -25,6 +38,8 @@ export const PracticeMode: React.FC = () => {
     selectedLessonId,
     setSelectedLessonId,
     recordQuestionResult,
+    completeLesson,
+    isSupabaseConnected,
   } = useMathVerse();
 
   const currentGrade = user?.grade || 6;
@@ -41,12 +56,34 @@ export const PracticeMode: React.FC = () => {
 
   // Matching pair states
   const [selectedLeft, setSelectedLeft] = useState<string | null>(null);
-  const [matchedPairs, setMatchedPairs] = useState<Record<string, string>>({}); // leftId -> rightText
+  const [matchedPairs, setMatchedPairs] = useState<Record<string, string>>({});
 
   // Result state
   const [isSubmitted, setIsSubmitted] = useState<boolean>(false);
   const [isCorrect, setIsCorrect] = useState<boolean>(false);
   const [showHint, setShowHint] = useState<boolean>(false);
+
+  // Supabase Cloud Progress & Results Tracking
+  const [cloudSaveStatus, setCloudSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [resumePrompt, setResumePrompt] = useState<{
+    currentQuestion: number;
+    total: number;
+    percent: number;
+    answers?: Record<string, any>;
+  } | null>(null);
+  const [sessionAnswers, setSessionAnswers] = useState<
+    Record<string, { answer: string; isCorrect: boolean }>
+  >({});
+  const [sessionCorrectCount, setSessionCorrectCount] = useState<number>(0);
+  const [sessionWrongCount, setSessionWrongCount] = useState<number>(0);
+  const [isLessonFinished, setIsLessonFinished] = useState<boolean>(false);
+  const [isCompletingCloud, setIsCompletingCloud] = useState<boolean>(false);
+
+  // Current Lesson Info
+  const currentLesson = React.useMemo(() => {
+    if (!selectedLessonId) return null;
+    return CURRICULUM_DATA.find((l) => l.id === selectedLessonId) || null;
+  }, [selectedLessonId]);
 
   // Filter questions according to selected lesson or grade/topic
   const availableQuestions: Question[] = React.useMemo(() => {
@@ -70,6 +107,44 @@ export const PracticeMode: React.FC = () => {
 
   const currentQ: Question | undefined = availableQuestions[currentIndex] || availableQuestions[0];
 
+  // 1. Kiểm tra tiến độ đang làm dở từ Supabase khi mở bài học
+  useEffect(() => {
+    let isCancelled = false;
+
+    async function checkCloudResume() {
+      if (!user?.id || !selectedLessonId || !isSupabaseConfigured()) {
+        return;
+      }
+
+      try {
+        const { data: progress, error } = await fetchLessonProgress(user.id, selectedLessonId);
+        if (error || !progress) return;
+
+        if (
+          !isCancelled &&
+          progress.status === 'in_progress' &&
+          progress.current_question > 0 &&
+          progress.current_question < availableQuestions.length
+        ) {
+          setResumePrompt({
+            currentQuestion: progress.current_question,
+            total: availableQuestions.length,
+            percent: progress.progress_percent,
+            answers: progress.answers,
+          });
+        }
+      } catch (e) {
+        console.warn('Lỗi kiểm tra tiến độ dở:', e);
+      }
+    }
+
+    checkCloudResume();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [selectedLessonId, user?.id, availableQuestions.length]);
+
   // Reset answer states when question changes
   useEffect(() => {
     setSelectedOption(null);
@@ -89,6 +164,39 @@ export const PracticeMode: React.FC = () => {
       setCurrentIndex(0);
     }
   }, [availableQuestions.length, currentIndex]);
+
+  // Hàm tự động lưu tiến độ vào bảng `learning_progress` trên Supabase (Upsert)
+  const saveProgressToCloud = async (
+    qIndex: number,
+    updatedAnswers: Record<string, any>,
+    status: 'in_progress' | 'completed' = 'in_progress'
+  ) => {
+    if (!user?.id || !isSupabaseConfigured()) return;
+
+    setCloudSaveStatus('saving');
+    const lessonTitle = currentLesson?.title || (selectedLessonId ? `Bài học ${selectedLessonId}` : `Luyện tập Lớp ${currentGrade}`);
+    const topic = currentLesson?.topic || (currentQ?.topic || 'Toán THCS');
+    const percent = Math.min(Math.round(((qIndex + 1) / availableQuestions.length) * 100), 100);
+
+    const { error } = await saveLearningProgress({
+      user_id: user.id,
+      lesson_id: selectedLessonId || `practice-grade-${currentGrade}-${topicFilter}`,
+      lesson_title: lessonTitle,
+      grade_level: currentGrade,
+      topic,
+      current_question: qIndex,
+      answers: updatedAnswers,
+      progress_percent: percent,
+      status,
+    });
+
+    if (error) {
+      setCloudSaveStatus('error');
+    } else {
+      setCloudSaveStatus('saved');
+      setTimeout(() => setCloudSaveStatus('idle'), 2500);
+    }
+  };
 
   if (!currentQ) {
     return (
@@ -129,7 +237,6 @@ export const PracticeMode: React.FC = () => {
     } else if (currentQ.type === 'fill_in') {
       if (!fillInAnswer.trim()) return;
       studentAns = fillInAnswer.trim();
-      // Support numbers and basic math equivalence
       const cleanInput = fillInAnswer.trim().replace(/\s+/g, '').replace(',', '.');
       const cleanTarget = String(currentQ.correctAnswer).trim().replace(/\s+/g, '').replace(',', '.');
       const numInput = parseFloat(cleanInput);
@@ -156,6 +263,18 @@ export const PracticeMode: React.FC = () => {
     setIsCorrect(correct);
     setIsSubmitted(true);
 
+    if (correct) {
+      setSessionCorrectCount((prev) => prev + 1);
+    } else {
+      setSessionWrongCount((prev) => prev + 1);
+    }
+
+    const updatedAnswers = {
+      ...sessionAnswers,
+      [currentQ.id]: { answer: studentAns, isCorrect: correct },
+    };
+    setSessionAnswers(updatedAnswers);
+
     recordQuestionResult(
       currentQ.id,
       correct,
@@ -166,26 +285,219 @@ export const PracticeMode: React.FC = () => {
       currentQ.explanation,
       currentQ.xpReward
     );
+
+    // Tự động lưu tiến độ vào Supabase Cloud sau khi trả lời
+    saveProgressToCloud(currentIndex, updatedAnswers, 'in_progress');
   };
 
   const handleNext = () => {
     soundManager.playClickSound();
     if (currentIndex < availableQuestions.length - 1) {
-      setCurrentIndex((prev) => prev + 1);
+      const nextIdx = currentIndex + 1;
+      setCurrentIndex(nextIdx);
+      // Cập nhật câu hỏi hiện tại lên Supabase Cloud
+      saveProgressToCloud(nextIdx, sessionAnswers, 'in_progress');
     } else {
-      setCurrentIndex(0); // Loop back
+      // Đã làm hết tất cả các câu trong bài
+      handleFinishLessonSession();
     }
+  };
+
+  // Hoàn thành toàn bộ bài luyện tập ➜ Ghi learning_results và đánh dấu learning_progress là completed
+  const handleFinishLessonSession = async () => {
+    setIsLessonFinished(true);
+    setIsCompletingCloud(true);
+    soundManager.triggerBigCelebration();
+
+    const lessonId = selectedLessonId || `practice-grade-${currentGrade}-${topicFilter}`;
+    const lessonTitle = currentLesson?.title || `Luyện tập Toán Lớp ${currentGrade}`;
+    const topic = currentLesson?.topic || (currentQ?.topic || 'Toán THCS');
+    const total = availableQuestions.length;
+    const score = Math.round((sessionCorrectCount / (total || 1)) * 100) / 10; // Điểm thang 10
+
+    if (selectedLessonId) {
+      await completeLesson(selectedLessonId, {
+        score,
+        correctCount: sessionCorrectCount,
+        wrongCount: sessionWrongCount,
+        answers: sessionAnswers,
+      });
+    } else if (user?.id && isSupabaseConfigured()) {
+      // Ghi kết quả bài tự chọn vào Supabase
+      await saveLearningResult({
+        user_id: user.id,
+        lesson_id: lessonId,
+        lesson_title: lessonTitle,
+        grade_level: currentGrade,
+        topic,
+        score,
+        correct_count: sessionCorrectCount,
+        wrong_count: sessionWrongCount,
+        completion_percent: Math.round((sessionCorrectCount / (total || 1)) * 100),
+        answers: sessionAnswers,
+      });
+
+      await saveLearningProgress({
+        user_id: user.id,
+        lesson_id: lessonId,
+        lesson_title: lessonTitle,
+        grade_level: currentGrade,
+        topic,
+        current_question: total,
+        answers: sessionAnswers,
+        progress_percent: 100,
+        status: 'completed',
+      });
+    }
+
+    setIsCompletingCloud(false);
   };
 
   // Clear specific lesson filter if user wants all questions
   const clearLessonFilter = () => {
     setSelectedLessonId(null);
+    setIsLessonFinished(false);
+    setCurrentIndex(0);
+    setSessionAnswers({});
+    setSessionCorrectCount(0);
+    setSessionWrongCount(0);
   };
 
   const distinctTopics = ['all', 'Số học', 'Phân số', 'Đại số', 'Hình học'];
 
+  // GIAO DIỆN HOÀN THÀNH BÀI TẬP (SUMMARY CARD)
+  if (isLessonFinished) {
+    const total = availableQuestions.length;
+    const score = Math.round((sessionCorrectCount / (total || 1)) * 100) / 10;
+    const percent = Math.round((sessionCorrectCount / (total || 1)) * 100);
+
+    return (
+      <div className="max-w-xl mx-auto space-y-6 pb-12 animate-in zoom-in-95">
+        <div className="p-8 rounded-3xl bg-slate-900 border border-slate-800 shadow-2xl text-center space-y-6">
+          <div className="inline-flex p-4 rounded-2xl bg-gradient-to-tr from-cyan-500 to-indigo-600 shadow-lg shadow-indigo-500/25">
+            <Trophy className="w-10 h-10 text-white" />
+          </div>
+
+          <div>
+            <h2 className="text-2xl sm:text-3xl font-extrabold text-white">
+              Hoàn thành bài luyện tập! 🎉
+            </h2>
+            <p className="text-sm text-slate-400 mt-1">
+              {currentLesson?.title || `Chuyên đề: ${topicFilter === 'all' ? 'Toán tổng hợp' : topicFilter}`}
+            </p>
+          </div>
+
+          <div className="grid grid-cols-3 gap-3 p-4 rounded-2xl bg-slate-950/80 border border-slate-800">
+            <div>
+              <div className="text-xs text-slate-400">Điểm số</div>
+              <div className="text-2xl font-black text-cyan-400 font-mono mt-0.5">
+                {score}/10
+              </div>
+            </div>
+            <div className="border-x border-slate-800">
+              <div className="text-xs text-slate-400">Đúng</div>
+              <div className="text-2xl font-black text-emerald-400 font-mono mt-0.5">
+                {sessionCorrectCount}/{total}
+              </div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-400">Chính xác</div>
+              <div className="text-2xl font-black text-purple-400 font-mono mt-0.5">
+                {percent}%
+              </div>
+            </div>
+          </div>
+
+          {/* Trạng thái lưu Supabase */}
+          <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800/80 flex items-center justify-center gap-2 text-xs">
+            {isCompletingCloud ? (
+              <span className="text-cyan-400 flex items-center gap-1.5 animate-pulse">
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Đang ghi kết quả vào Supabase PostgreSQL...
+              </span>
+            ) : user?.isSupabaseAuth ? (
+              <span className="text-emerald-400 flex items-center gap-1.5 font-medium">
+                <CheckCircle2 className="w-3.5 h-3.5" /> Kết quả đã được lưu vĩnh viễn vào Supabase Cloud.
+              </span>
+            ) : (
+              <span className="text-amber-400 flex items-center gap-1.5">
+                <CloudOff className="w-3.5 h-3.5" /> Đã lưu trên máy này (Đăng nhập Supabase để đồng bộ mọi thiết bị).
+              </span>
+            )}
+          </div>
+
+          <div className="flex flex-col sm:flex-row gap-3 pt-2">
+            <button
+              onClick={() => {
+                setIsLessonFinished(false);
+                setCurrentIndex(0);
+                setSessionAnswers({});
+                setSessionCorrectCount(0);
+                setSessionWrongCount(0);
+              }}
+              className="flex-1 py-3 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs sm:text-sm flex items-center justify-center gap-2 cursor-pointer transition-colors"
+            >
+              <RotateCcw className="w-4 h-4" /> Làm lại bài này
+            </button>
+            <button
+              onClick={clearLessonFilter}
+              className="flex-1 py-3 px-4 rounded-xl bg-gradient-to-r from-cyan-500 to-indigo-600 hover:from-cyan-400 hover:to-indigo-500 text-white font-bold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-md cursor-pointer transition-transform"
+            >
+              <span>Xem bài luyện khác</span>
+              <ChevronRight className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="max-w-3xl mx-auto space-y-6 pb-12">
+      {/* BANNER THÔNG BÁO TIẾP TỤC BÀI ĐANG LÀM DỞ TỪ SUPABASE */}
+      {resumePrompt && (
+        <div className="p-4 rounded-2xl bg-gradient-to-r from-indigo-950/80 via-purple-950/80 to-slate-900 border border-indigo-500/40 shadow-lg flex flex-col sm:flex-row sm:items-center justify-between gap-3 animate-in fade-in">
+          <div className="flex items-center gap-3">
+            <div className="p-2.5 rounded-xl bg-indigo-600/30 text-cyan-300">
+              <History className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="text-sm font-bold text-white flex items-center gap-1.5">
+                <span>Phát hiện bài đang làm dở từ thiết bị khác</span>
+                <span className="px-2 py-0.5 rounded-full text-[10px] bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 font-semibold">
+                  {resumePrompt.percent}%
+                </span>
+              </div>
+              <p className="text-xs text-slate-300 mt-0.5">
+                Em đã dừng lại ở <strong>Câu {resumePrompt.currentQuestion + 1}</strong> trên {resumePrompt.total} câu.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 self-end sm:self-auto">
+            <button
+              onClick={() => setResumePrompt(null)}
+              className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold cursor-pointer"
+            >
+              Bắt đầu từ câu 1
+            </button>
+            <button
+              onClick={() => {
+                soundManager.playClickSound();
+                setCurrentIndex(resumePrompt.currentQuestion);
+                if (resumePrompt.answers) {
+                  setSessionAnswers(resumePrompt.answers);
+                }
+                setResumePrompt(null);
+              }}
+              className="px-3.5 py-1.5 rounded-lg bg-gradient-to-r from-cyan-500 to-indigo-600 hover:from-cyan-400 hover:to-indigo-500 text-white font-bold text-xs shadow-md cursor-pointer flex items-center gap-1"
+            >
+              <span>Học tiếp</span>
+              <ArrowRight className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Header Bar */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-900/60 p-4 rounded-2xl border border-slate-800">
         <div>
@@ -205,8 +517,30 @@ export const PracticeMode: React.FC = () => {
               </span>
             )}
           </div>
-          <div className="text-xs text-slate-400 mt-1">
-            Câu {currentIndex + 1} trên {availableQuestions.length} câu • Thưởng: +{currentQ.xpReward} XP
+          <div className="text-xs text-slate-400 mt-1 flex items-center gap-3">
+            <span>
+              Câu {currentIndex + 1} trên {availableQuestions.length} câu • Thưởng: +{currentQ.xpReward} XP
+            </span>
+            {/* Supabase Auto-save Status Badge */}
+            {user?.isSupabaseAuth && (
+              <span className="inline-flex items-center gap-1 text-[11px]">
+                {cloudSaveStatus === 'saving' && (
+                  <span className="text-cyan-400 flex items-center gap-1">
+                    <RefreshCw className="w-3 h-3 animate-spin" /> Đang lưu Cloud...
+                  </span>
+                )}
+                {cloudSaveStatus === 'saved' && (
+                  <span className="text-emerald-400 flex items-center gap-1">
+                    <CloudCheck className="w-3.5 h-3.5" /> Đã lưu tiến độ
+                  </span>
+                )}
+                {cloudSaveStatus === 'error' && (
+                  <span className="text-rose-400 flex items-center gap-1">
+                    <CloudOff className="w-3.5 h-3.5" /> Lưu thất bại
+                  </span>
+                )}
+              </span>
+            )}
           </div>
         </div>
 
@@ -282,7 +616,7 @@ export const PracticeMode: React.FC = () => {
           {/* 1. Multiple Choice */}
           {currentQ.type === 'multiple_choice' && currentQ.options && (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              {currentQ.options.map((opt, idx) => {
+              {currentQ.options.map((opt) => {
                 const isSelected = selectedOption === opt;
                 let optionStyle = 'bg-slate-950/60 border-slate-800 hover:border-slate-700 text-slate-200';
 
@@ -298,50 +632,33 @@ export const PracticeMode: React.FC = () => {
 
                 return (
                   <button
-                    key={idx}
+                    key={opt}
                     disabled={isSubmitted}
                     onClick={() => {
                       setSelectedOption(opt);
                       soundManager.playClickSound();
                     }}
-                    className={`p-4 rounded-2xl border text-left font-semibold text-sm sm:text-base transition-all flex items-center justify-between cursor-pointer ${optionStyle}`}
+                    className={`p-4 rounded-2xl border text-left font-medium text-sm transition-all flex items-center justify-between cursor-pointer ${optionStyle}`}
                   >
-                    <div className="flex items-center gap-3">
-                      <span className="w-7 h-7 rounded-lg bg-slate-800/80 border border-slate-700 flex items-center justify-center text-xs font-mono font-bold text-slate-300">
-                        {String.fromCharCode(65 + idx)}
-                      </span>
-                      <span>{opt}</span>
-                    </div>
-                    {isSubmitted && opt === currentQ.correctAnswer && (
-                      <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
-                    )}
+                    <span>{opt}</span>
+                    {isSelected && <span className="w-2 h-2 rounded-full bg-cyan-400 shrink-0 ml-2" />}
                   </button>
                 );
               })}
             </div>
           )}
 
-          {/* 2. Fill in Answer */}
+          {/* 2. Fill In */}
           {currentQ.type === 'fill_in' && (
-            <div className="space-y-2">
-              <label className="text-xs text-slate-400 font-semibold">
-                Nhập câu trả lời của em:
-              </label>
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  disabled={isSubmitted}
-                  value={fillInAnswer}
-                  onChange={(e) => setFillInAnswer(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !isSubmitted && fillInAnswer.trim()) {
-                      handleSubmit();
-                    }
-                  }}
-                  placeholder="Nhập số hoặc kết quả (ví dụ: 24, -5, 1/2...)"
-                  className="flex-1 px-4 py-3 bg-slate-950/80 border border-slate-700 rounded-xl text-white font-mono text-base focus:ring-2 focus:ring-cyan-500 focus:outline-none"
-                />
-              </div>
+            <div>
+              <input
+                type="text"
+                disabled={isSubmitted}
+                value={fillInAnswer}
+                onChange={(e) => setFillInAnswer(e.target.value)}
+                placeholder="Nhập kết quả hoặc số của em (ví dụ: 12 hoặc 3/4)..."
+                className="w-full px-4 py-3.5 bg-slate-950 border border-slate-700 rounded-xl text-white placeholder-slate-500 text-base focus:ring-2 focus:ring-cyan-500 focus:outline-none"
+              />
             </div>
           )}
 
@@ -354,117 +671,96 @@ export const PracticeMode: React.FC = () => {
                   setTrueFalseAnswer(true);
                   soundManager.playClickSound();
                 }}
-                className={`p-5 rounded-2xl border font-bold text-base transition-all flex flex-col items-center gap-2 cursor-pointer ${
+                className={`p-4 rounded-2xl border font-bold text-center transition-all cursor-pointer ${
                   trueFalseAnswer === true
-                    ? 'bg-emerald-950/60 border-emerald-400 text-emerald-300 ring-2 ring-emerald-500/30'
-                    : 'bg-slate-950/50 border-slate-800 hover:border-slate-700 text-slate-300'
+                    ? 'bg-emerald-600/30 border-emerald-400 text-emerald-200 ring-2 ring-emerald-400/30'
+                    : 'bg-slate-950/60 border-slate-800 text-slate-300 hover:border-slate-700'
                 }`}
               >
-                <span className="text-2xl">✅</span>
-                <span>Đúng</span>
+                ĐÚNG
               </button>
-
               <button
                 disabled={isSubmitted}
                 onClick={() => {
                   setTrueFalseAnswer(false);
                   soundManager.playClickSound();
                 }}
-                className={`p-5 rounded-2xl border font-bold text-base transition-all flex flex-col items-center gap-2 cursor-pointer ${
+                className={`p-4 rounded-2xl border font-bold text-center transition-all cursor-pointer ${
                   trueFalseAnswer === false
-                    ? 'bg-rose-950/60 border-rose-400 text-rose-300 ring-2 ring-rose-500/30'
-                    : 'bg-slate-950/50 border-slate-800 hover:border-slate-700 text-slate-300'
+                    ? 'bg-rose-600/30 border-rose-400 text-rose-200 ring-2 ring-rose-400/30'
+                    : 'bg-slate-950/60 border-slate-800 text-slate-300 hover:border-slate-700'
                 }`}
               >
-                <span className="text-2xl">❌</span>
-                <span>Sai</span>
+                SAI
               </button>
             </div>
           )}
 
-          {/* 4. Find Error in Solution */}
+          {/* 4. Find Error Step */}
           {currentQ.type === 'find_error' && currentQ.errorSteps && (
-            <div className="space-y-3">
-              <div className="text-xs text-slate-400">
-                Bấm chọn bước mà em nghĩ là chứa lỗi sai trong lời giải:
-              </div>
-              <div className="space-y-2">
-                {currentQ.errorSteps.map((step) => {
-                  const isChosen = selectedErrorStep === step.stepNumber;
-                  let cardStyle = 'bg-slate-950/60 border-slate-800 hover:border-slate-700';
-
-                  if (isSubmitted) {
-                    if (step.isError) {
-                      cardStyle = 'bg-rose-950/40 border-rose-500 text-rose-200';
-                    }
-                  } else if (isChosen) {
-                    cardStyle = 'bg-indigo-950/60 border-cyan-400 text-cyan-200';
-                  }
-
-                  return (
-                    <button
-                      key={step.stepNumber}
-                      disabled={isSubmitted}
-                      onClick={() => {
-                        setSelectedErrorStep(step.stepNumber);
-                        soundManager.playClickSound();
-                      }}
-                      className={`w-full p-3.5 rounded-xl border text-left text-sm font-medium transition-all flex items-center justify-between cursor-pointer ${cardStyle}`}
-                    >
-                      <span>{step.text}</span>
-                      {isChosen && !isSubmitted && (
-                        <span className="text-xs font-bold text-cyan-400">Đã chọn</span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
+            <div className="space-y-2">
+              {currentQ.errorSteps.map((step) => {
+                const isSelected = selectedErrorStep === step.stepNumber;
+                return (
+                  <button
+                    key={step.stepNumber}
+                    disabled={isSubmitted}
+                    onClick={() => {
+                      setSelectedErrorStep(step.stepNumber);
+                      soundManager.playClickSound();
+                    }}
+                    className={`w-full p-3.5 rounded-xl border text-left text-sm transition-all flex items-start gap-3 cursor-pointer ${
+                      isSelected
+                        ? 'bg-indigo-950 border-cyan-400 text-cyan-200 ring-2 ring-cyan-400/30'
+                        : 'bg-slate-950/60 border-slate-800 text-slate-300 hover:border-slate-700'
+                    }`}
+                  >
+                    <span className="font-bold text-indigo-400 shrink-0">
+                      Bước {step.stepNumber}:
+                    </span>
+                    <span>{step.text}</span>
+                  </button>
+                );
+              })}
             </div>
           )}
 
-          {/* 5. Match formula pairs */}
+          {/* 5. Matching Pairs */}
           {currentQ.type === 'match_formula' && currentQ.matchingPairs && (
-            <div className="space-y-4">
-              <div className="text-xs text-slate-400">
-                1. Chọn ô bên trái (cột A) → 2. Chọn ô tương ứng bên phải (cột B) để ghép đôi:
-              </div>
+            <div className="space-y-3">
+              <p className="text-xs text-slate-400">
+                Nhấp vào ô vế trái, sau đó nhấp vào ô kết quả tương ứng ở vế phải để ghép đôi:
+              </p>
               <div className="grid grid-cols-2 gap-4">
-                {/* Left column */}
                 <div className="space-y-2">
-                  <div className="text-xs font-bold text-cyan-400 uppercase">Cột A</div>
                   {currentQ.matchingPairs.map((pair) => {
-                    const isLeftSelected = selectedLeft === pair.id;
-                    const hasMatch = !!matchedPairs[pair.id];
-
+                    const isSelected = selectedLeft === pair.id;
+                    const assignedRight = matchedPairs[pair.id];
                     return (
                       <button
                         key={pair.id}
                         disabled={isSubmitted}
                         onClick={() => handleLeftClick(pair.id)}
                         className={`w-full p-3 rounded-xl border text-left text-xs sm:text-sm font-semibold transition-all cursor-pointer ${
-                          hasMatch
-                            ? 'bg-indigo-950/40 border-indigo-500/50 text-indigo-300'
-                            : isLeftSelected
-                            ? 'bg-cyan-950/60 border-cyan-400 text-cyan-200 ring-2 ring-cyan-400/30'
-                            : 'bg-slate-950/60 border-slate-800 text-slate-300 hover:border-slate-700'
+                          isSelected
+                            ? 'bg-cyan-600/30 border-cyan-400 text-cyan-200'
+                            : assignedRight
+                            ? 'bg-purple-950/40 border-purple-500/40 text-purple-200'
+                            : 'bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700'
                         }`}
                       >
-                        <div className="flex items-center justify-between">
-                          <span>{pair.left}</span>
-                          {hasMatch && (
-                            <span className="text-[10px] text-cyan-400 font-mono font-bold">
-                              → {matchedPairs[pair.id]}
-                            </span>
-                          )}
-                        </div>
+                        <div className="truncate">{pair.left}</div>
+                        {assignedRight && (
+                          <div className="text-[11px] text-cyan-400 mt-1 truncate">
+                            ➔ {assignedRight}
+                          </div>
+                        )}
                       </button>
                     );
                   })}
                 </div>
 
-                {/* Right column */}
                 <div className="space-y-2">
-                  <div className="text-xs font-bold text-purple-400 uppercase">Cột B</div>
                   {currentQ.matchingPairs.map((pair) => {
                     const isAssigned = Object.values(matchedPairs).includes(pair.right);
                     return (
@@ -547,7 +843,9 @@ export const PracticeMode: React.FC = () => {
                 onClick={handleNext}
                 className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-white font-bold text-sm shadow-md shadow-emerald-500/25 flex items-center gap-2 transition-transform active:scale-95 cursor-pointer"
               >
-                <span>Câu tiếp theo</span>
+                <span>
+                  {currentIndex === availableQuestions.length - 1 ? 'Hoàn thành bài' : 'Câu tiếp theo'}
+                </span>
                 <ChevronRight className="w-4 h-4" />
               </button>
             )}

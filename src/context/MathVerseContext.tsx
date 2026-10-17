@@ -1,9 +1,20 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import { Grade, UserProfile, MistakeRecord } from '../types/mathverse';
 import { BADGES_DATA, getUserLevel } from '../data/badgesData';
 import { soundManager } from '../utils/soundEffects';
 import { isGradeUnlocked } from '../data/promotionExamsData';
 import { analyzeStudentCompetency } from '../utils/competencyAnalyzer';
+import { CURRICULUM_DATA } from '../data/curriculumData';
+import {
+  supabase,
+  isSupabaseConfigured,
+  saveLearningResult,
+  saveLearningProgress,
+  fetchLearningResults,
+  fetchActiveInProgress,
+  LearningResult,
+  LearningProgress,
+} from '../lib/supabaseClient';
 
 interface MathVerseContextType {
   user: UserProfile | null;
@@ -20,7 +31,15 @@ interface MathVerseContextType {
   login: (name: string, grade: Grade, avatar: string) => void;
   logout: () => void;
   addXp: (amount: number, reason?: string) => void;
-  completeLesson: (lessonId: string) => void;
+  completeLesson: (
+    lessonId: string,
+    details?: {
+      score?: number;
+      correctCount?: number;
+      wrongCount?: number;
+      answers?: Record<string, any>;
+    }
+  ) => Promise<void>;
   recordQuestionResult: (
     questionId: string,
     isCorrect: boolean,
@@ -41,6 +60,20 @@ interface MathVerseContextType {
   markMistakeAsUnderstood: (questionId: string) => void;
   removeMistake: (questionId: string) => void;
   clearNewBadge: () => void;
+
+  // Supabase Auth & Cloud Data
+  isSupabaseConnected: boolean;
+  authLoading: boolean;
+  loginWithSupabase: (email: string, password: string) => Promise<{ error: string | null }>;
+  registerWithSupabase: (
+    email: string,
+    password: string,
+    name: string,
+    grade: Grade,
+    avatar: string
+  ) => Promise<{ error: string | null; needsEmailConfirmation?: boolean }>;
+  resetSupabasePassword: (email: string) => Promise<{ error: string | null; message?: string }>;
+  refreshCloudProgress: () => Promise<void>;
 }
 
 const STORAGE_KEY = 'mathverse_user_profile_v1';
@@ -78,8 +111,7 @@ export const MathVerseProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       const saved = localStorage.getItem(STORAGE_KEY);
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (parsed && parsed.name) {
-          // Check streak on startup
+        if (parsed && (parsed.name || parsed.email)) {
           const today = new Date().toISOString().split('T')[0];
           const lastDate = parsed.lastActiveDate || today;
           let streak = parsed.streak || 1;
@@ -89,7 +121,7 @@ export const MathVerseProvider: React.FC<{ children: React.ReactNode }> = ({ chi
             if (lastDate === yesterday) {
               streak += 1;
             } else {
-              streak = 1; // streak broke
+              streak = 1;
             }
           }
 
@@ -114,25 +146,127 @@ export const MathVerseProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const [selectedPracticeTopic, setSelectedPracticeTopic] = useState<string | null>(null);
   const [recentXpGained, setRecentXpGained] = useState<{ amount: number; reason?: string } | null>(null);
   const [newBadgeUnlocked, setNewBadgeUnlocked] = useState<string | null>(null);
+  const [authLoading, setAuthLoading] = useState<boolean>(true);
 
   // State for locked grade attempt and active promotion exam
   const [lockedGradeAttempt, setLockedGradeAttempt] = useState<Grade | null>(null);
   const [activePromotionExamGrade, setActivePromotionExamGrade] = useState<Grade | null>(null);
-  const xpTimerRef = React.useRef<any>(null);
+  const xpTimerRef = useRef<any>(null);
+  const isSavingLessonRef = useRef<Record<string, boolean>>({});
 
-  // Sync with sound manager and safe localStorage persistence
+  // 1. Phục hồi và đồng bộ phiên đăng nhập Supabase khi tải lại trang
+  useEffect(() => {
+    let isMounted = true;
+
+    async function checkInitialSupabaseSession() {
+      if (!isSupabaseConfigured()) {
+        if (isMounted) setAuthLoading(false);
+        return;
+      }
+
+      try {
+        const { data, error } = await supabase.auth.getSession();
+        if (error) throw error;
+
+        if (data?.session?.user && isMounted) {
+          await syncSupabaseUserToState(data.session.user);
+        }
+      } catch (err) {
+        console.warn('[MathVerse] Lỗi kiểm tra session Supabase:', err);
+      } finally {
+        if (isMounted) setAuthLoading(false);
+      }
+    }
+
+    checkInitialSupabaseSession();
+
+    // Lắng nghe thay đổi trạng thái đăng nhập từ Supabase Auth
+    let authListener: { subscription: { unsubscribe: () => void } } | null = null;
+    if (isSupabaseConfigured()) {
+      const { data } = supabase.auth.onAuthStateChange(async (event, session) => {
+        if (!isMounted) return;
+
+        if (event === 'SIGNED_IN' && session?.user) {
+          await syncSupabaseUserToState(session.user);
+        } else if (event === 'SIGNED_OUT') {
+          setUser(null);
+          try {
+            localStorage.removeItem(STORAGE_KEY);
+          } catch {
+            // Ignore
+          }
+        }
+      });
+      authListener = data;
+    }
+
+    return () => {
+      isMounted = false;
+      if (authListener?.subscription) {
+        authListener.subscription.unsubscribe();
+      }
+    };
+  }, []);
+
+  // Hàm chuyển đổi Supabase Auth User sang UserProfile của MathVerse
+  const syncSupabaseUserToState = async (sbUser: any) => {
+    const meta = sbUser.user_metadata || {};
+    const name = meta.name || sbUser.email?.split('@')[0] || 'Học sinh MathVerse';
+    const grade: Grade = meta.grade && [6, 7, 8, 9].includes(meta.grade) ? meta.grade : 6;
+    const avatar = meta.avatar || '👨‍🚀';
+
+    // Đọc lịch sử hoàn thành từ bảng learning_results trên Supabase
+    let cloudCompletedLessons: string[] = [];
+    try {
+      const { data: results } = await fetchLearningResults(sbUser.id);
+      if (results && results.length > 0) {
+        cloudCompletedLessons = Array.from(new Set(results.map((r) => r.lesson_id)));
+      }
+    } catch (err) {
+      console.warn('[MathVerse] Không thể tải kết quả từ Supabase:', err);
+    }
+
+    setUser((prev) => {
+      const currentCompleted = prev?.completedLessons || [];
+      const combinedCompleted = Array.from(new Set([...currentCompleted, ...cloudCompletedLessons]));
+
+      const updated: UserProfile = {
+        ...defaultProfile,
+        ...(prev || {}),
+        id: sbUser.id,
+        email: sbUser.email,
+        isSupabaseAuth: true,
+        name,
+        grade: prev?.grade || grade,
+        avatar: prev?.avatar || avatar,
+        completedLessons: combinedCompleted,
+        unlockedGrades: prev?.unlockedGrades || [6],
+        completedGradeExams: prev?.completedGradeExams || {},
+      };
+
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+      } catch {
+        // Ignore
+      }
+
+      return updated;
+    });
+  };
+
+  // Đồng bộ âm thanh và lưu profile vào localStorage khi state thay đổi
   useEffect(() => {
     if (user) {
       soundManager.setSoundEnabled(user.soundEnabled ?? true);
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(user));
       } catch (err) {
-        console.warn('MathVerse: Không thể lưu profile vào localStorage (quota hoặc private browsing):', err);
+        console.warn('MathVerse: Không thể lưu profile vào localStorage:', err);
       }
     }
   }, [user]);
 
-  // Check badges whenever user profile changes
+  // Kiểm tra huy hiệu khi điểm và tiến độ tăng
   const checkBadgeUnlocks = (updatedUser: UserProfile): UserProfile => {
     let newlyUnlocked: string[] = [];
     const currentBadges = new Set(updatedUser.unlockedBadges);
@@ -176,6 +310,123 @@ export const MathVerseProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     };
   }, []);
 
+  // 2. SUPABASE AUTH: Đăng ký tài khoản
+  const registerWithSupabase = async (
+    email: string,
+    password: string,
+    name: string,
+    grade: Grade,
+    avatar: string
+  ): Promise<{ error: string | null; needsEmailConfirmation?: boolean }> => {
+    if (!isSupabaseConfigured()) {
+      return {
+        error:
+          'Supabase chưa được cấu hình. Vui lòng thêm VITE_SUPABASE_URL và VITE_SUPABASE_PUBLISHABLE_KEY vào biến môi trường.',
+      };
+    }
+
+    try {
+      const { data, error } = await supabase.auth.signUp({
+        email,
+        password,
+        options: {
+          data: {
+            name,
+            grade,
+            avatar,
+          },
+        },
+      });
+
+      if (error) {
+        return { error: error.message };
+      }
+
+      // Kiểm tra nếu Supabase yêu cầu xác nhận email trước khi đăng nhập
+      if (data?.user && !data.session) {
+        return { error: null, needsEmailConfirmation: true };
+      }
+
+      if (data?.user && data.session) {
+        await syncSupabaseUserToState(data.user);
+        soundManager.playTriumphSound();
+      }
+
+      return { error: null, needsEmailConfirmation: false };
+    } catch (err: any) {
+      return { error: err.message || 'Lỗi kết nối đến Supabase Auth' };
+    }
+  };
+
+  // 3. SUPABASE AUTH: Đăng nhập tài khoản
+  const loginWithSupabase = async (
+    email: string,
+    password: string
+  ): Promise<{ error: string | null }> => {
+    if (!isSupabaseConfigured()) {
+      return {
+        error:
+          'Supabase chưa được cấu hình. Vui lòng thêm VITE_SUPABASE_URL và VITE_SUPABASE_PUBLISHABLE_KEY vào biến môi trường.',
+      };
+    }
+
+    try {
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
+
+      if (error) {
+        let msg = error.message;
+        if (error.message.includes('Invalid login credentials')) {
+          msg = 'Email hoặc mật khẩu không chính xác.';
+        } else if (error.message.includes('Email not confirmed')) {
+          msg = 'Email của em chưa được xác nhận. Vui lòng kiểm tra hộp thư đến.';
+        }
+        return { error: msg };
+      }
+
+      if (data?.user) {
+        await syncSupabaseUserToState(data.user);
+        soundManager.playTriumphSound();
+      }
+
+      return { error: null };
+    } catch (err: any) {
+      return { error: err.message || 'Lỗi kết nối đến Supabase' };
+    }
+  };
+
+  // 4. SUPABASE AUTH: Quên mật khẩu
+  const resetSupabasePassword = async (
+    email: string
+  ): Promise<{ error: string | null; message?: string }> => {
+    if (!isSupabaseConfigured()) {
+      return {
+        error: 'Supabase chưa được cấu hình biến môi trường.',
+      };
+    }
+
+    try {
+      const redirectTo = window.location.origin + window.location.pathname;
+      const { error } = await supabase.auth.resetPasswordForEmail(email, {
+        redirectTo,
+      });
+
+      if (error) {
+        return { error: error.message };
+      }
+
+      return {
+        error: null,
+        message: 'Đã gửi liên kết khôi phục mật khẩu vào hòm thư. Vui lòng kiểm tra email của em.',
+      };
+    } catch (err: any) {
+      return { error: err.message || 'Không thể gửi email đặt lại mật khẩu' };
+    }
+  };
+
+  // Chế độ đăng nhập nhanh (Local Guest Mode)
   const login = (name: string, grade: Grade, avatar: string) => {
     const today = new Date().toISOString().split('T')[0];
     const unlockedGrades: Grade[] = [6];
@@ -203,17 +454,26 @@ export const MathVerseProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       completedGradeExams,
       lastActiveDate: today,
       streak: 1,
+      isSupabaseAuth: false,
     };
     setUser(newUser);
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(newUser));
     } catch {
-      // Ignore if quota exceeded
+      // Ignore
     }
     soundManager.playTriumphSound();
   };
 
-  const logout = () => {
+  // Đăng xuất: gọi Supabase signOut và dọn sạch session
+  const logout = async () => {
+    if (isSupabaseConfigured()) {
+      try {
+        await supabase.auth.signOut();
+      } catch (err) {
+        console.warn('Lỗi đăng xuất Supabase:', err);
+      }
+    }
     setUser(null);
     try {
       localStorage.removeItem(STORAGE_KEY);
@@ -237,9 +497,31 @@ export const MathVerseProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     });
   };
 
-  const completeLesson = (lessonId: string) => {
+  // 5. HOÀN THÀNH BÀI HỌC: Cập nhật state + ghi vào learning_results và learning_progress trên Supabase
+  const completeLesson = async (
+    lessonId: string,
+    details?: {
+      score?: number;
+      correctCount?: number;
+      wrongCount?: number;
+      answers?: Record<string, any>;
+    }
+  ) => {
     if (!user) return;
+
+    // Ngăn chặn ghi trùng kết quả khi người dùng nhấn nút liên tiếp
+    if (isSavingLessonRef.current[lessonId]) {
+      return;
+    }
+    isSavingLessonRef.current[lessonId] = true;
+
     const isNew = !user.completedLessons.includes(lessonId);
+
+    // Tìm thông tin bài học từ CURRICULUM_DATA
+    const lesson = CURRICULUM_DATA.find((l) => l.id === lessonId);
+    const lessonTitle = lesson?.title || lessonId;
+    const gradeLevel = lesson?.grade || user.grade;
+    const topic = lesson?.topic || 'Toán THCS';
 
     setUser((prev) => {
       if (!prev) return null;
@@ -257,6 +539,71 @@ export const MathVerseProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       soundManager.triggerConfetti();
       soundManager.playTriumphSound();
       triggerXpNotification(50, 'Hoàn thành bài học', 3000);
+    }
+
+    // Nếu học sinh đã đăng nhập Supabase, ghi kết quả vào PostgreSQL Cloud
+    if (user.isSupabaseAuth && isSupabaseConfigured()) {
+      try {
+        const correctCount = details?.correctCount ?? (details?.score ? Math.round(details.score / 10) : 5);
+        const wrongCount = details?.wrongCount ?? 0;
+        const total = correctCount + wrongCount;
+        const score = details?.score ?? 10;
+        const completionPercent = total > 0 ? Math.round((correctCount / total) * 100) : 100;
+
+        // Ghi vào learning_results
+        await saveLearningResult({
+          user_id: user.id || '',
+          lesson_id: lessonId,
+          lesson_title: lessonTitle,
+          grade_level: gradeLevel,
+          topic,
+          score,
+          correct_count: correctCount,
+          wrong_count: wrongCount,
+          completion_percent: completionPercent,
+          answers: details?.answers || {},
+        });
+
+        // Đánh dấu bảng learning_progress là 'completed'
+        await saveLearningProgress({
+          user_id: user.id || '',
+          lesson_id: lessonId,
+          lesson_title: lessonTitle,
+          grade_level: gradeLevel,
+          topic,
+          current_question: total,
+          answers: details?.answers || {},
+          progress_percent: 100,
+          status: 'completed',
+        });
+      } catch (err) {
+        console.warn('[MathVerse] Ghi Supabase learning_results thất bại:', err);
+      } finally {
+        setTimeout(() => {
+          delete isSavingLessonRef.current[lessonId];
+        }, 1500);
+      }
+    } else {
+      setTimeout(() => {
+        delete isSavingLessonRef.current[lessonId];
+      }, 1000);
+    }
+  };
+
+  const refreshCloudProgress = async () => {
+    if (!user?.id || !isSupabaseConfigured()) return;
+    try {
+      const { data: results } = await fetchLearningResults(user.id);
+      if (results && results.length > 0) {
+        const cloudLessons = Array.from(new Set(results.map((r) => r.lesson_id)));
+        setUser((prev) => {
+          if (!prev) return null;
+          const combined = Array.from(new Set([...prev.completedLessons, ...cloudLessons]));
+          return { ...prev, completedLessons: combined };
+        });
+      }
+    } catch (e) {
+      console.warn('Lỗi làm mới tiến độ đám mây:', e);
     }
   };
 
@@ -299,10 +646,8 @@ export const MathVerseProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           mistakeCount: currentCount,
           isUnderstood: false,
         };
-        // Lưu tối đa 50 câu sai gần nhất, đưa câu vừa sai lên đầu
         mistakes = [newMistake, ...mistakes.filter((m) => m.questionId !== questionId)].slice(0, 50);
       } else {
-        // Nếu sau đó làm đúng, đánh dấu đã hiểu
         const existingIdx = mistakes.findIndex((m) => m.questionId === questionId);
         if (existingIdx >= 0) {
           mistakes[existingIdx] = {
@@ -323,7 +668,6 @@ export const MathVerseProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       };
 
       const finalUser = checkBadgeUnlocks(updated);
-      // Đưa side-effect phân tích năng lực ra khỏi updater pure function
       queueMicrotask(() => {
         try {
           analyzeStudentCompetency(finalUser);
@@ -357,7 +701,6 @@ export const MathVerseProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       setUser((prev) => (prev ? { ...prev, grade: targetGrade } : null));
       soundManager.playClickSound();
     } else {
-      // Grade is locked! Trigger modal prompt
       soundManager.playWrongSound();
       setLockedGradeAttempt(targetGrade);
     }
@@ -385,16 +728,15 @@ export const MathVerseProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
       const updated: UserProfile = {
         ...prev,
-        grade: nextGrade, // Automatically switch to the newly unlocked grade
+        grade: nextGrade,
         xp: prev.xp + 150,
         unlockedGrades: Array.from(currentUnlocked) as Grade[],
         completedGradeExams: updatedExams,
       };
-
       return checkBadgeUnlocks(updated);
     });
 
-    triggerXpNotification(150, `Mở khóa thành công Lớp ${nextGrade}`, 3500);
+    triggerXpNotification(150, `Vượt cấp thành công lên Lớp ${nextGrade}! 🏆`, 3500);
   };
 
   const updateProfile = (name: string, avatar: string) => {
@@ -402,23 +744,26 @@ export const MathVerseProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   };
 
   const resetAllData = () => {
-    if (!user) return;
-    const cleanUser: UserProfile = {
+    const today = new Date().toISOString().split('T')[0];
+    const resetUser: UserProfile = {
       ...defaultProfile,
-      name: user.name,
-      grade: user.grade,
-      avatar: user.avatar,
+      name: user?.name || 'Học sinh',
+      grade: 6,
+      avatar: user?.avatar || '👨‍🚀',
+      lastActiveDate: today,
+      isSupabaseAuth: user?.isSupabaseAuth,
+      email: user?.email,
+      id: user?.id,
     };
-    setUser(cleanUser);
+    setUser(resetUser);
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(cleanUser));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(resetUser));
     } catch {
       // Ignore
     }
   };
 
   const markMistakeAsUnderstood = (questionId: string) => {
-    if (!user) return;
     setUser((prev) => {
       if (!prev) return null;
       const mistakes = prev.recentMistakes.map((m) =>
@@ -441,12 +786,12 @@ export const MathVerseProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       });
       return finalUser;
     });
+
     soundManager.playCorrectSound();
-    triggerXpNotification(15, 'Đã hiểu và khắc phục câu sai', 2500);
+    triggerXpNotification(15, 'Đã hiểu bài', 2000);
   };
 
   const removeMistake = (questionId: string) => {
-    if (!user) return;
     setUser((prev) => {
       if (!prev) return null;
       const mistakes = prev.recentMistakes.filter((m) => m.questionId !== questionId);
@@ -500,6 +845,12 @@ export const MathVerseProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         markMistakeAsUnderstood,
         removeMistake,
         clearNewBadge,
+        isSupabaseConnected: isSupabaseConfigured(),
+        authLoading,
+        loginWithSupabase,
+        registerWithSupabase,
+        resetSupabasePassword,
+        refreshCloudProgress,
       }}
     >
       {children}
