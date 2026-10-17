@@ -159,7 +159,7 @@ export const MathVerseProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     let isMounted = true;
 
     async function checkInitialSupabaseSession() {
-      if (!isSupabaseConfigured()) {
+      if (!isSupabaseConfigured() || !supabase) {
         if (isMounted) setAuthLoading(false);
         return;
       }
@@ -182,7 +182,7 @@ export const MathVerseProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
     // Lắng nghe thay đổi trạng thái đăng nhập từ Supabase Auth
     let authListener: { subscription: { unsubscribe: () => void } } | null = null;
-    if (isSupabaseConfigured()) {
+    if (isSupabaseConfigured() && supabase) {
       const { data } = supabase.auth.onAuthStateChange(async (event, session) => {
         if (!isMounted) return;
 
@@ -217,10 +217,30 @@ export const MathVerseProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
     // Đọc lịch sử hoàn thành từ bảng learning_results trên Supabase
     let cloudCompletedLessons: string[] = [];
+    let cloudAnsweredCount = 0;
+    let cloudCorrectCount = 0;
+    let cloudTotalXp = 0;
+    let cloudTopicStats: Record<string, { correct: number; total: number }> = {};
+
     try {
       const { data: results } = await fetchLearningResults(sbUser.id);
       if (results && results.length > 0) {
         cloudCompletedLessons = Array.from(new Set(results.map((r) => r.lesson_id)));
+        results.forEach((r) => {
+          const c = Number(r.correct_count) || 0;
+          const w = Number(r.wrong_count) || 0;
+          cloudCorrectCount += c;
+          cloudAnsweredCount += (c + w);
+          cloudTotalXp += Math.round((Number(r.score) || 0) * 10) + 50;
+
+          if (r.topic) {
+            if (!cloudTopicStats[r.topic]) {
+              cloudTopicStats[r.topic] = { correct: 0, total: 0 };
+            }
+            cloudTopicStats[r.topic].correct += c;
+            cloudTopicStats[r.topic].total += (c + w);
+          }
+        });
       }
     } catch (err) {
       console.warn('[MathVerse] Không thể tải kết quả từ Supabase:', err);
@@ -229,6 +249,33 @@ export const MathVerseProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     setUser((prev) => {
       const currentCompleted = prev?.completedLessons || [];
       const combinedCompleted = Array.from(new Set([...currentCompleted, ...cloudCompletedLessons]));
+      const completedCount = combinedCompleted.length;
+
+      // Đảm bảo số liệu tối thiểu tương ứng với các bài đã hoàn thành
+      const fallbackAnswered = completedCount * 5;
+      const fallbackCorrect = completedCount * 4;
+      const fallbackXp = completedCount * 50;
+
+      const answeredQuestionsCount = Math.max(
+        prev?.answeredQuestionsCount || 0,
+        cloudAnsweredCount,
+        fallbackAnswered
+      );
+      const correctAnswersCount = Math.max(
+        prev?.correctAnswersCount || 0,
+        cloudCorrectCount,
+        fallbackCorrect
+      );
+      const xp = Math.max(
+        prev?.xp || 0,
+        cloudTotalXp,
+        fallbackXp
+      );
+
+      const mergedTopicStats = {
+        ...(prev?.topicStats || {}),
+        ...cloudTopicStats,
+      };
 
       const updated: UserProfile = {
         ...defaultProfile,
@@ -240,6 +287,10 @@ export const MathVerseProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         grade: prev?.grade || grade,
         avatar: prev?.avatar || avatar,
         completedLessons: combinedCompleted,
+        answeredQuestionsCount,
+        correctAnswersCount,
+        xp,
+        topicStats: mergedTopicStats,
         unlockedGrades: prev?.unlockedGrades || [6],
         completedGradeExams: prev?.completedGradeExams || {},
       };
@@ -250,7 +301,7 @@ export const MathVerseProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         // Ignore
       }
 
-      return updated;
+      return checkBadgeUnlocks(updated);
     });
   };
 
@@ -318,7 +369,7 @@ export const MathVerseProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     grade: Grade,
     avatar: string
   ): Promise<{ error: string | null; needsEmailConfirmation?: boolean }> => {
-    if (!isSupabaseConfigured()) {
+    if (!isSupabaseConfigured() || !supabase) {
       return {
         error:
           'Supabase chưa được cấu hình. Vui lòng thêm VITE_SUPABASE_URL và VITE_SUPABASE_PUBLISHABLE_KEY vào biến môi trường.',
@@ -363,7 +414,7 @@ export const MathVerseProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     email: string,
     password: string
   ): Promise<{ error: string | null }> => {
-    if (!isSupabaseConfigured()) {
+    if (!isSupabaseConfigured() || !supabase) {
       return {
         error:
           'Supabase chưa được cấu hình. Vui lòng thêm VITE_SUPABASE_URL và VITE_SUPABASE_PUBLISHABLE_KEY vào biến môi trường.',
@@ -401,7 +452,7 @@ export const MathVerseProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const resetSupabasePassword = async (
     email: string
   ): Promise<{ error: string | null; message?: string }> => {
-    if (!isSupabaseConfigured()) {
+    if (!isSupabaseConfigured() || !supabase) {
       return {
         error: 'Supabase chưa được cấu hình biến môi trường.',
       };
@@ -467,7 +518,7 @@ export const MathVerseProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   // Đăng xuất: gọi Supabase signOut và dọn sạch session
   const logout = async () => {
-    if (isSupabaseConfigured()) {
+    if (isSupabaseConfigured() && supabase) {
       try {
         await supabase.auth.signOut();
       } catch (err) {

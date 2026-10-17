@@ -1,11 +1,14 @@
 import { createClient, SupabaseClient, User } from '@supabase/supabase-js';
 
-// Đọc cấu hình từ biến môi trường
-const supabaseUrl = (import.meta as any).env?.VITE_SUPABASE_URL || '';
+// Đọc cấu hình từ biến môi trường với fallback đã cung cấp
+const supabaseUrl =
+  (import.meta as any).env?.VITE_SUPABASE_URL ||
+  'https://dqwxqqdyesytzlkybmlt.supabase.co';
+
 const supabaseKey =
   (import.meta as any).env?.VITE_SUPABASE_PUBLISHABLE_KEY ||
   (import.meta as any).env?.VITE_SUPABASE_ANON_KEY ||
-  '';
+  'sb_publishable_VGS5tKUakbo0L8kyHRUjUw_Lw3yfLDI';
 
 export const isSupabaseConfigured = (): boolean => {
   return Boolean(
@@ -16,8 +19,8 @@ export const isSupabaseConfigured = (): boolean => {
   );
 };
 
-// Khởi tạo Supabase client an toàn (không crash nếu chưa có biến môi trường)
-export const supabase: SupabaseClient = isSupabaseConfigured()
+// Khởi tạo Supabase client khi có biến môi trường hợp lệ, không tạo URL hoặc key giả
+export const supabase: SupabaseClient | null = isSupabaseConfigured()
   ? createClient(supabaseUrl, supabaseKey, {
       auth: {
         persistSession: true,
@@ -25,12 +28,7 @@ export const supabase: SupabaseClient = isSupabaseConfigured()
         detectSessionInUrl: true,
       },
     })
-  : createClient('https://placeholder-project.supabase.co', 'placeholder-anon-key-mathverse', {
-      auth: {
-        persistSession: false,
-        autoRefreshToken: false,
-      },
-    });
+  : null;
 
 // Kiểu dữ liệu tương ứng với bảng learning_results trong Supabase PostgreSQL
 export interface LearningResult {
@@ -69,9 +67,13 @@ export interface LearningProgress {
 export async function saveLearningResult(
   result: Omit<LearningResult, 'id' | 'completed_at'>
 ): Promise<{ data: LearningResult | null; error: Error | null }> {
-  if (!isSupabaseConfigured()) {
-    console.warn('[Supabase] VITE_SUPABASE_URL hoặc Key chưa cấu hình. Bỏ qua ghi cloud.');
-    return { data: null, error: new Error('Supabase chưa được cấu hình') };
+  if (!isSupabaseConfigured() || !supabase) {
+    return {
+      data: null,
+      error: new Error(
+        'Supabase chưa được cấu hình. Vui lòng thêm VITE_SUPABASE_URL và VITE_SUPABASE_PUBLISHABLE_KEY vào biến môi trường.'
+      ),
+    };
   }
 
   try {
@@ -113,8 +115,13 @@ export async function saveLearningResult(
 export async function saveLearningProgress(
   progress: Omit<LearningProgress, 'id' | 'updated_at'>
 ): Promise<{ data: LearningProgress | null; error: Error | null }> {
-  if (!isSupabaseConfigured()) {
-    return { data: null, error: new Error('Supabase chưa được cấu hình') };
+  if (!isSupabaseConfigured() || !supabase) {
+    return {
+      data: null,
+      error: new Error(
+        'Supabase chưa được cấu hình. Vui lòng thêm VITE_SUPABASE_URL và VITE_SUPABASE_PUBLISHABLE_KEY vào biến môi trường.'
+      ),
+    };
   }
 
   try {
@@ -156,7 +163,7 @@ export async function saveLearningProgress(
 export async function fetchActiveInProgress(
   userId: string
 ): Promise<{ data: LearningProgress[]; error: Error | null }> {
-  if (!isSupabaseConfigured() || !userId) {
+  if (!isSupabaseConfigured() || !supabase || !userId) {
     return { data: [], error: null };
   }
 
@@ -185,7 +192,7 @@ export async function fetchActiveInProgress(
 export async function fetchLearningResults(
   userId: string
 ): Promise<{ data: LearningResult[]; error: Error | null }> {
-  if (!isSupabaseConfigured() || !userId) {
+  if (!isSupabaseConfigured() || !supabase || !userId) {
     return { data: [], error: null };
   }
 
@@ -214,7 +221,7 @@ export async function fetchLessonProgress(
   userId: string,
   lessonId: string
 ): Promise<{ data: LearningProgress | null; error: Error | null }> {
-  if (!isSupabaseConfigured() || !userId || !lessonId) {
+  if (!isSupabaseConfigured() || !supabase || !userId || !lessonId) {
     return { data: null, error: null };
   }
 

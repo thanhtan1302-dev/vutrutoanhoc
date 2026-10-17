@@ -34,6 +34,8 @@ jobs:
         run: npm run build
         env:
           VITE_MATHBOT_URL: https://vutrutoanhoc.vercel.app/api/mathbot
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.VITE_SUPABASE_PUBLISHABLE_KEY }}
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
