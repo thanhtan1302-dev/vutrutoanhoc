@@ -19,9 +19,10 @@ import {
 } from 'lucide-react';
 import { soundManager } from '../utils/soundEffects';
 import { formatMathNotation } from '../utils/formatMath';
+import { saveLearningResult, isSupabaseConfigured } from '../lib/supabaseClient';
 
 export const QuizExamMode: React.FC = () => {
-  const { user, addXp, setActiveTab, setSelectedLessonId, recordQuestionResult } = useMathVerse();
+  const { user, addXp, setActiveTab, setSelectedLessonId, recordQuestionResult, refreshCloudProgress } = useMathVerse();
   const currentGrade = user?.grade || 6;
 
   // Setup state: null means choosing test options
@@ -131,6 +132,48 @@ export const QuizExamMode: React.FC = () => {
     // Reward XP bonus for completing exam
     const bonusXp = Math.round((correctCount / quizQuestions.length) * 100);
     addXp(bonusXp, 'Thưởng kết quả trắc nghiệm');
+
+    // Lưu kết quả bài thi trắc nghiệm vào Supabase Cloud
+    if (user?.id && isSupabaseConfigured()) {
+      const totalQ = quizQuestions.length;
+      const scoreVal = Math.round((correctCount / (totalQ || 1)) * 100) / 10;
+      const formattedAnswers: Record<string, { answer: string; isCorrect: boolean }> = {};
+      quizQuestions.forEach((q, idx) => {
+        const studentAns = userAnswers[idx] || 'Chưa trả lời';
+        let correct = false;
+        if (q.type === 'multiple_choice') {
+          correct = studentAns === q.correctAnswer;
+        } else if (q.type === 'fill_in') {
+          const cleanA = studentAns.trim().replace(',', '.');
+          const cleanB = String(q.correctAnswer).trim().replace(',', '.');
+          const numA = parseFloat(cleanA);
+          const numB = parseFloat(cleanB);
+          correct = cleanA === cleanB || (!isNaN(numA) && !isNaN(numB) && numA === numB);
+        } else if (q.type === 'true_false') {
+          correct = (studentAns === 'true') === q.correctAnswer;
+        } else {
+          correct = studentAns === String(q.correctAnswer);
+        }
+        formattedAnswers[q.id] = { answer: studentAns, isCorrect: correct };
+      });
+
+      saveLearningResult({
+        user_id: user.id,
+        lesson_id: `quiz-exam-${currentGrade}-${Date.now()}`,
+        lesson_title: `Đề thi trắc nghiệm Lớp ${currentGrade} (${totalQ} câu)`,
+        grade_level: currentGrade,
+        topic: 'Đề tổng hợp',
+        score: scoreVal,
+        correct_count: correctCount,
+        wrong_count: totalQ - correctCount,
+        completion_percent: Math.round((correctCount / (totalQ || 1)) * 100),
+        answers: formattedAnswers,
+      }).then(() => {
+        refreshCloudProgress?.();
+      }).catch((e) => {
+        console.warn('Lỗi ghi kết quả bài thi vào Supabase:', e);
+      });
+    }
 
     if (correctCount / quizQuestions.length >= 0.7) {
       soundManager.triggerConfetti();

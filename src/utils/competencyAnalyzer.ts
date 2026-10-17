@@ -1,6 +1,7 @@
-import { UserProfile, Lesson, Grade } from '../types/mathverse';
+import { UserProfile, Lesson, Grade, MistakeRecord } from '../types/mathverse';
 import { CURRICULUM_DATA } from '../data/curriculumData';
 import { QUESTIONS_DATA } from '../data/questionsData';
+import { LearningResult, LearningProgress } from '../lib/supabaseClient';
 
 export interface CompetencyItem {
   topic: string;
@@ -56,9 +57,13 @@ export interface StudentCompetencyAnalysis {
 const STORAGE_KEY_ANALYSIS = 'mathverse_ai_competency_analysis_v1';
 
 /**
- * Thuật toán AI phân tích năng lực học sinh (Client-side, không backend, lưu localStorage)
+ * Thuật toán AI phân tích năng lực học sinh tổng hợp dữ liệu từ Supabase Cloud và Profile
  */
-export function analyzeStudentCompetency(user: UserProfile | null): StudentCompetencyAnalysis {
+export function analyzeStudentCompetency(
+  user: UserProfile | null,
+  cloudResults?: LearningResult[],
+  cloudInProgress?: LearningProgress[]
+): StudentCompetencyAnalysis {
   const now = Date.now();
   const formattedDate = new Date(now).toLocaleString('vi-VN', {
     day: '2-digit',
@@ -68,7 +73,59 @@ export function analyzeStudentCompetency(user: UserProfile | null): StudentCompe
     minute: '2-digit',
   });
 
-  if (!user || user.answeredQuestionsCount === 0) {
+  // 1. Tổng hợp dữ liệu từ Supabase nếu có danh sách cloudResults
+  let topicStats: Record<string, { correct: number; total: number }> = {};
+  let totalEvaluated = 0;
+  let totalCorrect = 0;
+  let mistakes: MistakeRecord[] = [];
+
+  const hasCloudRecords = Boolean(cloudResults && cloudResults.length > 0);
+
+  if (hasCloudRecords && cloudResults) {
+    cloudResults.forEach((r) => {
+      const topic = r.topic || 'Toán học';
+      const c = Number(r.correct_count) || 0;
+      const w = Number(r.wrong_count) || 0;
+      const tot = c + w;
+
+      if (!topicStats[topic]) {
+        topicStats[topic] = { correct: 0, total: 0 };
+      }
+      topicStats[topic].correct += c;
+      topicStats[topic].total += tot;
+
+      totalEvaluated += tot;
+      totalCorrect += c;
+
+      // Trích xuất các lỗi sai từ answers của Supabase record
+      if (r.answers && typeof r.answers === 'object') {
+        Object.entries(r.answers).forEach(([qId, ans]: [string, any]) => {
+          if (ans && ans.isCorrect === false) {
+            const qData = QUESTIONS_DATA.find((q) => q.id === qId);
+            mistakes.push({
+              questionId: qId,
+              questionText: qData?.question || `Câu hỏi: ${qId}`,
+              topic,
+              userAnswer: typeof ans === 'string' ? ans : (ans.answer || 'Đáp án chưa chính xác'),
+              correctAnswer: String(qData?.correctAnswer || ''),
+              explanation: qData?.explanation || '',
+              timestamp: r.completed_at ? new Date(r.completed_at).getTime() : now,
+              mistakeCount: 1,
+              isUnderstood: false,
+            });
+          }
+        });
+      }
+    });
+  } else if (user) {
+    topicStats = user.topicStats || {};
+    totalEvaluated = user.answeredQuestionsCount || 0;
+    totalCorrect = user.correctAnswersCount || 0;
+    mistakes = user.recentMistakes || [];
+  }
+
+  // Trường hợp chưa có dữ liệu làm bài nào
+  if (totalEvaluated === 0) {
     const emptyAnalysis: StudentCompetencyAnalysis = {
       analyzedAt: now,
       formattedDate,
@@ -80,24 +137,23 @@ export function analyzeStudentCompetency(user: UserProfile | null): StudentCompe
       roadmap: [
         {
           stepNumber: 1,
-          title: 'Khởi động năng lực',
+          title: 'Khởi động bài tập đầu tiên',
           actionType: 'practice',
           targetTopic: 'Số học',
           targetTab: 'practice',
-          description: 'Làm từ 3 - 5 câu hỏi bất kỳ để hệ thống AI thu thập dữ liệu phân tích ban đầu.',
+          description: 'Làm từ 3 - 5 câu hỏi để hệ thống AI thu thập và phân tích dữ liệu thực tế từ Supabase Cloud.',
           estimatedMinutes: 5,
         },
       ],
-      aiAdvice: 'Chào em! Hãy hoàn thành một vài bài tập trong mục Luyện tập hoặc Trắc nghiệm để AI kích hoạt phân tích năng lực nhé.',
+      aiAdvice: 'Chào em! Hiện chưa có kết quả làm bài nào được lưu trên Supabase Cloud. Hãy hoàn thành ít nhất 1 bài học hoặc bài luyện tập để AI kích hoạt phân tích năng lực chi tiết nhé.',
       status: 'insufficient_data',
     };
     saveStoredAnalysis(emptyAnalysis);
     return emptyAnalysis;
   }
 
-  const topicStats = user.topicStats || {};
-  const mistakes = user.recentMistakes || [];
-  const gradeLessons = CURRICULUM_DATA.filter((l) => l.grade === user.grade);
+  const currentGrade = user?.grade || (cloudResults && cloudResults[0]?.grade_level) || 6;
+  const gradeLessons = CURRICULUM_DATA.filter((l) => l.grade === currentGrade);
 
   // Đếm lỗi sai theo chuyên đề
   const mistakeCountsByTopic: Record<string, number> = {};
@@ -270,10 +326,10 @@ export function analyzeStudentCompetency(user: UserProfile | null): StudentCompe
   const analysisResult: StudentCompetencyAnalysis = {
     analyzedAt: now,
     formattedDate,
-    totalQuestionsEvaluated: user.answeredQuestionsCount,
+    totalQuestionsEvaluated: totalEvaluated,
     overallAccuracyRate:
-      user.answeredQuestionsCount > 0
-        ? Math.round((user.correctAnswersCount / user.answeredQuestionsCount) * 100)
+      totalEvaluated > 0
+        ? Math.round((totalCorrect / totalEvaluated) * 100)
         : 0,
     strengths,
     weaknesses,

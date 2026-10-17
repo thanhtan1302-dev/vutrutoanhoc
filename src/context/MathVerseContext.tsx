@@ -5,6 +5,7 @@ import { soundManager } from '../utils/soundEffects';
 import { isGradeUnlocked } from '../data/promotionExamsData';
 import { analyzeStudentCompetency } from '../utils/competencyAnalyzer';
 import { CURRICULUM_DATA } from '../data/curriculumData';
+import { QUESTIONS_DATA } from '../data/questionsData';
 import {
   supabase,
   isSupabaseConfigured,
@@ -220,11 +221,20 @@ export const MathVerseProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     let cloudAnsweredCount = 0;
     let cloudCorrectCount = 0;
     let cloudTotalXp = 0;
-    let cloudTopicStats: Record<string, { correct: number; total: number }> = {};
+    let cloudTopicStats: Record<string, { correct: number; total: number }> = {
+      'Số học': { correct: 0, total: 0 },
+      'Phân số': { correct: 0, total: 0 },
+      'Đại số': { correct: 0, total: 0 },
+      'Hình học': { correct: 0, total: 0 },
+      'Thống kê': { correct: 0, total: 0 },
+    };
+    let cloudMistakes: MistakeRecord[] = [];
+    let fetchedResults: LearningResult[] = [];
 
     try {
       const { data: results } = await fetchLearningResults(sbUser.id);
       if (results && results.length > 0) {
+        fetchedResults = results;
         cloudCompletedLessons = Array.from(new Set(results.map((r) => r.lesson_id)));
         results.forEach((r) => {
           const c = Number(r.correct_count) || 0;
@@ -240,6 +250,26 @@ export const MathVerseProvider: React.FC<{ children: React.ReactNode }> = ({ chi
             cloudTopicStats[r.topic].correct += c;
             cloudTopicStats[r.topic].total += (c + w);
           }
+
+          // Trích xuất các lỗi sai thật từ answers trong Supabase
+          if (r.answers && typeof r.answers === 'object') {
+            Object.entries(r.answers).forEach(([qId, ansObj]: [string, any]) => {
+              if (ansObj && ansObj.isCorrect === false) {
+                const qData = QUESTIONS_DATA.find((q) => q.id === qId);
+                cloudMistakes.push({
+                  questionId: qId,
+                  questionText: qData?.question || `Câu hỏi: ${qId}`,
+                  topic: r.topic || qData?.topic || 'Toán học',
+                  userAnswer: typeof ansObj === 'string' ? ansObj : (ansObj.answer || 'Chưa đúng'),
+                  correctAnswer: String(qData?.correctAnswer || ''),
+                  explanation: qData?.explanation || '',
+                  timestamp: r.completed_at ? new Date(r.completed_at).getTime() : Date.now(),
+                  mistakeCount: 1,
+                  isUnderstood: false,
+                });
+              }
+            });
+          }
         });
       }
     } catch (err) {
@@ -247,50 +277,22 @@ export const MathVerseProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     }
 
     setUser((prev) => {
-      const currentCompleted = prev?.completedLessons || [];
-      const combinedCompleted = Array.from(new Set([...currentCompleted, ...cloudCompletedLessons]));
-      const completedCount = combinedCompleted.length;
-
-      // Đảm bảo số liệu tối thiểu tương ứng với các bài đã hoàn thành
-      const fallbackAnswered = completedCount * 5;
-      const fallbackCorrect = completedCount * 4;
-      const fallbackXp = completedCount * 50;
-
-      const answeredQuestionsCount = Math.max(
-        prev?.answeredQuestionsCount || 0,
-        cloudAnsweredCount,
-        fallbackAnswered
-      );
-      const correctAnswersCount = Math.max(
-        prev?.correctAnswersCount || 0,
-        cloudCorrectCount,
-        fallbackCorrect
-      );
-      const xp = Math.max(
-        prev?.xp || 0,
-        cloudTotalXp,
-        fallbackXp
-      );
-
-      const mergedTopicStats = {
-        ...(prev?.topicStats || {}),
-        ...cloudTopicStats,
-      };
-
+      // Đối với tài khoản Supabase: dữ liệu bài học, số câu, điểm số và lỗi sai
+      // được tổng hợp trực tiếp từ bảng learning_results trên Supabase PostgreSQL.
       const updated: UserProfile = {
         ...defaultProfile,
-        ...(prev || {}),
         id: sbUser.id,
         email: sbUser.email,
         isSupabaseAuth: true,
         name,
-        grade: prev?.grade || grade,
-        avatar: prev?.avatar || avatar,
-        completedLessons: combinedCompleted,
-        answeredQuestionsCount,
-        correctAnswersCount,
-        xp,
-        topicStats: mergedTopicStats,
+        grade: meta.grade || prev?.grade || grade,
+        avatar: meta.avatar || prev?.avatar || avatar,
+        completedLessons: cloudCompletedLessons,
+        answeredQuestionsCount: cloudAnsweredCount,
+        correctAnswersCount: cloudCorrectCount,
+        xp: cloudTotalXp,
+        topicStats: cloudTopicStats,
+        recentMistakes: cloudMistakes,
         unlockedGrades: prev?.unlockedGrades || [6],
         completedGradeExams: prev?.completedGradeExams || {},
       };
@@ -299,6 +301,13 @@ export const MathVerseProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
       } catch {
         // Ignore
+      }
+
+      // Kích hoạt phân tích năng lực AI ngay trên dữ liệu Supabase
+      try {
+        analyzeStudentCompetency(updated, fetchedResults);
+      } catch (e) {
+        console.warn('Lỗi phân tích năng lực khi đồng bộ Supabase:', e);
       }
 
       return checkBadgeUnlocks(updated);
@@ -627,6 +636,9 @@ export const MathVerseProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           progress_percent: 100,
           status: 'completed',
         });
+
+        // Đồng bộ lại toàn bộ thống kê trực tiếp từ Supabase
+        await refreshCloudProgress();
       } catch (err) {
         console.warn('[MathVerse] Ghi Supabase learning_results thất bại:', err);
       } finally {
@@ -645,12 +657,79 @@ export const MathVerseProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     if (!user?.id || !isSupabaseConfigured()) return;
     try {
       const { data: results } = await fetchLearningResults(user.id);
-      if (results && results.length > 0) {
+      if (results) {
         const cloudLessons = Array.from(new Set(results.map((r) => r.lesson_id)));
+        let cloudAnsweredCount = 0;
+        let cloudCorrectCount = 0;
+        let cloudTotalXp = 0;
+        let cloudTopicStats: Record<string, { correct: number; total: number }> = {
+          'Số học': { correct: 0, total: 0 },
+          'Phân số': { correct: 0, total: 0 },
+          'Đại số': { correct: 0, total: 0 },
+          'Hình học': { correct: 0, total: 0 },
+          'Thống kê': { correct: 0, total: 0 },
+        };
+        let cloudMistakes: MistakeRecord[] = [];
+
+        results.forEach((r) => {
+          const c = Number(r.correct_count) || 0;
+          const w = Number(r.wrong_count) || 0;
+          cloudCorrectCount += c;
+          cloudAnsweredCount += (c + w);
+          cloudTotalXp += Math.round((Number(r.score) || 0) * 10) + 50;
+
+          const t = r.topic || 'Toán học';
+          if (!cloudTopicStats[t]) {
+            cloudTopicStats[t] = { correct: 0, total: 0 };
+          }
+          cloudTopicStats[t].correct += c;
+          cloudTopicStats[t].total += (c + w);
+
+          if (r.answers && typeof r.answers === 'object') {
+            Object.entries(r.answers).forEach(([qId, ansObj]: [string, any]) => {
+              if (ansObj && ansObj.isCorrect === false) {
+                const qData = QUESTIONS_DATA.find((q) => q.id === qId);
+                cloudMistakes.push({
+                  questionId: qId,
+                  questionText: qData?.question || `Câu hỏi: ${qId}`,
+                  topic: t,
+                  userAnswer: typeof ansObj === 'string' ? ansObj : (ansObj.answer || 'Chưa đúng'),
+                  correctAnswer: String(qData?.correctAnswer || ''),
+                  explanation: qData?.explanation || '',
+                  timestamp: r.completed_at ? new Date(r.completed_at).getTime() : Date.now(),
+                  mistakeCount: 1,
+                  isUnderstood: false,
+                });
+              }
+            });
+          }
+        });
+
         setUser((prev) => {
           if (!prev) return null;
-          const combined = Array.from(new Set([...prev.completedLessons, ...cloudLessons]));
-          return { ...prev, completedLessons: combined };
+          const updated: UserProfile = {
+            ...prev,
+            completedLessons: cloudLessons,
+            answeredQuestionsCount: cloudAnsweredCount,
+            correctAnswersCount: cloudCorrectCount,
+            xp: Math.max(prev.xp, cloudTotalXp),
+            topicStats: cloudTopicStats,
+            recentMistakes: cloudMistakes.length > 0 ? cloudMistakes : (prev.recentMistakes || []),
+          };
+
+          try {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+          } catch {
+            // Ignore
+          }
+
+          try {
+            analyzeStudentCompetency(updated, results);
+          } catch (e) {
+            console.warn('Lỗi phân tích năng lực khi làm mới đám mây:', e);
+          }
+
+          return checkBadgeUnlocks(updated);
         });
       }
     } catch (e) {

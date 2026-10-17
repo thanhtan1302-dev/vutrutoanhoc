@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useMathVerse } from '../context/MathVerseContext';
+import { MistakeRecord } from '../types/mathverse';
 import {
   BarChart3,
   TrendingUp,
@@ -49,6 +50,7 @@ import {
   RoadmapStep,
 } from '../utils/competencyAnalyzer';
 import { soundManager } from '../utils/soundEffects';
+import { QUESTIONS_DATA } from '../data/questionsData';
 import {
   fetchLearningResults,
   fetchActiveInProgress,
@@ -102,6 +104,10 @@ export const ProgressAnalyticsView: React.FC = () => {
       if (resProgress.error) throw resProgress.error;
       setCloudResults(resResults.data);
       setCloudInProgress(resProgress.data);
+
+      // Phân tích năng lực AI ngay trên dữ liệu Supabase vừa tải
+      const comp = analyzeStudentCompetency(user, resResults.data, resProgress.data);
+      setCompetency(comp);
     } catch (err: any) {
       setCloudError(err.message || 'Lỗi khi kết nối đến Supabase Cloud.');
     } finally {
@@ -118,7 +124,12 @@ export const ProgressAnalyticsView: React.FC = () => {
   useEffect(() => {
     // Tự động phân tích khi user thay đổi hoặc nhận event
     if (user) {
-      setCompetency(analyzeStudentCompetency(user));
+      if (cloudResults.length > 0) {
+        setCompetency(analyzeStudentCompetency(user, cloudResults, cloudInProgress));
+      } else {
+        const stored = getStoredCompetencyAnalysis();
+        setCompetency(stored || analyzeStudentCompetency(user));
+      }
     }
 
     const handleFeedbackUpdate = () => {
@@ -131,7 +142,7 @@ export const ProgressAnalyticsView: React.FC = () => {
       if (stored) {
         setCompetency(stored);
       } else if (user) {
-        setCompetency(analyzeStudentCompetency(user));
+        setCompetency(analyzeStudentCompetency(user, cloudResults, cloudInProgress));
       }
     };
 
@@ -142,11 +153,14 @@ export const ProgressAnalyticsView: React.FC = () => {
       window.removeEventListener('mathverse-ai-feedback-updated', handleFeedbackUpdate);
       window.removeEventListener('mathverse-competency-updated', handleCompetencyUpdate);
     };
-  }, [user]);
+  }, [user, cloudResults]);
 
   if (!user) return null;
 
-  // 1. Tính tổng câu, câu đúng và điểm XP từ cả Local UserProfile và Supabase Cloud Results
+  const isCloudAuth = Boolean(user.isSupabaseAuth && isSupabaseConfigured());
+
+  // 1. Tính tổng câu, câu đúng và điểm XP:
+  // Nếu là tài khoản Supabase Cloud: tổng hợp trực tiếp từ bảng learning_results trên PostgreSQL
   const cloudTotalAnswered = cloudResults.reduce(
     (sum, r) => sum + ((Number(r.correct_count) || 0) + (Number(r.wrong_count) || 0)),
     0
@@ -160,61 +174,40 @@ export const ProgressAnalyticsView: React.FC = () => {
     0
   );
 
-  const completedLessonCount = user.completedLessons?.length || 0;
-  // Mỗi bài học đã hoàn thành tương ứng với tối thiểu 5 câu hỏi và 50 XP
-  const fallbackAnswered = completedLessonCount * 5;
-  const fallbackCorrect = completedLessonCount * 4;
-  const fallbackXp = completedLessonCount * 50;
-
-  const totalAnswered = Math.max(user.answeredQuestionsCount || 0, cloudTotalAnswered, fallbackAnswered);
-  const totalCorrect = Math.max(user.correctAnswersCount || 0, cloudTotalCorrect, fallbackCorrect);
-  const totalXp = Math.max(user.xp || 0, cloudTotalXp, fallbackXp, totalCorrect * 10);
+  const totalAnswered = isCloudAuth ? cloudTotalAnswered : (user.answeredQuestionsCount || 0);
+  const totalCorrect = isCloudAuth ? cloudTotalCorrect : (user.correctAnswersCount || 0);
+  const totalXp = isCloudAuth ? Math.max(cloudTotalXp, user.xp || 0) : (user.xp || 0);
   const overallAccuracy = totalAnswered > 0 ? Math.round((totalCorrect / totalAnswered) * 100) : 0;
 
-  // Thời gian học ước tính: mỗi câu ~ 1.5 phút, mỗi bài hoàn thành ~ 10 phút
-  const estimatedMins = Math.max(
-    Math.round((totalAnswered || 0) * 1.5 + (completedLessonCount || 0) * 10),
-    completedLessonCount > 0 ? 30 : 0
-  );
+  // Thời gian học ước tính: tính từ số câu và số bài thật đã hoàn thành
+  const completedLessonCount = isCloudAuth ? cloudResults.length : (user.completedLessons?.length || 0);
+  const estimatedMins = totalAnswered > 0
+    ? Math.round(totalAnswered * 1.5 + completedLessonCount * 8)
+    : 0;
   const estimatedHours = (estimatedMins / 60).toFixed(1);
 
-  // Analyze topics: gộp topicStats từ user và cloudResults
+  // 2. Phân môn & Tỉ lệ chính xác: Tổng hợp trung thực từ Supabase Cloud
   const combinedTopicStats: Record<string, { correct: number; total: number }> = {
     'Số học': { correct: 0, total: 0 },
     'Phân số': { correct: 0, total: 0 },
     'Đại số': { correct: 0, total: 0 },
     'Hình học': { correct: 0, total: 0 },
     'Thống kê': { correct: 0, total: 0 },
-    ...(user.topicStats || {}),
   };
 
-  cloudResults.forEach((r) => {
-    if (r.topic) {
-      if (!combinedTopicStats[r.topic]) {
-        combinedTopicStats[r.topic] = { correct: 0, total: 0 };
+  if (isCloudAuth) {
+    cloudResults.forEach((r) => {
+      const topic = r.topic || 'Số học';
+      if (!combinedTopicStats[topic]) {
+        combinedTopicStats[topic] = { correct: 0, total: 0 };
       }
-      combinedTopicStats[r.topic].correct += (Number(r.correct_count) || 0);
-      combinedTopicStats[r.topic].total += ((Number(r.correct_count) || 0) + (Number(r.wrong_count) || 0));
-    }
-  });
-
-  // Nếu học sinh đã hoàn thành bài mà các topic đều 0 câu, tự động phân bổ hợp lý
-  if (totalAnswered > 0) {
-    const sumTopicTotal = Object.values(combinedTopicStats).reduce((s, t) => s + t.total, 0);
-    if (sumTopicTotal === 0) {
-      combinedTopicStats['Số học'] = {
-        correct: Math.round(totalCorrect * 0.4),
-        total: Math.round(totalAnswered * 0.4),
-      };
-      combinedTopicStats['Phân số'] = {
-        correct: Math.round(totalCorrect * 0.3),
-        total: Math.round(totalAnswered * 0.3),
-      };
-      combinedTopicStats['Hình học'] = {
-        correct: Math.round(totalCorrect * 0.3),
-        total: Math.round(totalAnswered * 0.3),
-      };
-    }
+      combinedTopicStats[topic].correct += (Number(r.correct_count) || 0);
+      combinedTopicStats[topic].total += ((Number(r.correct_count) || 0) + (Number(r.wrong_count) || 0));
+    });
+  } else {
+    Object.entries(user.topicStats || {}).forEach(([topic, stats]) => {
+      combinedTopicStats[topic] = { ...stats };
+    });
   }
 
   const topicsData = Object.entries(combinedTopicStats).map(([topic, stats]) => {
@@ -227,11 +220,37 @@ export const ProgressAnalyticsView: React.FC = () => {
     };
   });
 
+  // Trích xuất danh sách câu sai thật từ Supabase Cloud
+  const cloudMistakes: MistakeRecord[] = [];
+  if (isCloudAuth && cloudResults.length > 0) {
+    cloudResults.forEach((r) => {
+      if (r.answers && typeof r.answers === 'object') {
+        Object.entries(r.answers).forEach(([qId, ansObj]: [string, any]) => {
+          if (ansObj && ansObj.isCorrect === false) {
+            const qData = QUESTIONS_DATA.find((q) => q.id === qId);
+            cloudMistakes.push({
+              questionId: qId,
+              questionText: qData?.question || `Câu hỏi: ${qId}`,
+              topic: r.topic || qData?.topic || 'Toán học',
+              userAnswer: typeof ansObj === 'string' ? ansObj : (ansObj.answer || 'Chưa đúng'),
+              correctAnswer: String(qData?.correctAnswer || ''),
+              explanation: qData?.explanation || '',
+              timestamp: r.completed_at ? new Date(r.completed_at).getTime() : Date.now(),
+              mistakeCount: 1,
+              isUnderstood: false,
+            });
+          }
+        });
+      }
+    });
+  }
+  const displayMistakes = isCloudAuth && cloudMistakes.length > 0 ? cloudMistakes : user.recentMistakes;
+
   const handleManualReanalyze = () => {
     soundManager.playClickSound();
     setIsRefreshing(true);
     setTimeout(() => {
-      const updated = analyzeStudentCompetency(user);
+      const updated = analyzeStudentCompetency(user, cloudResults, cloudInProgress);
       setCompetency(updated);
       setIsRefreshing(false);
       soundManager.playCorrectSound();
@@ -863,30 +882,30 @@ export const ProgressAnalyticsView: React.FC = () => {
         <div className="grid grid-cols-3 gap-3">
           <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 text-center space-y-0.5">
             <div className="text-[11px] text-slate-400">Câu sai gần đây</div>
-            <div className="text-lg font-bold font-mono text-white">{user.recentMistakes.length}</div>
+            <div className="text-lg font-bold font-mono text-white">{displayMistakes.length}</div>
           </div>
           <div className="p-3 rounded-xl bg-slate-950 border border-amber-500/30 text-center space-y-0.5">
             <div className="text-[11px] text-slate-400">Sai nhiều nhất (≥2)</div>
             <div className="text-lg font-bold font-mono text-amber-400">
-              {user.recentMistakes.filter((m) => (m.mistakeCount || 1) >= 2).length}
+              {displayMistakes.filter((m) => (m.mistakeCount || 1) >= 2).length}
             </div>
           </div>
           <div className="p-3 rounded-xl bg-slate-950 border border-emerald-500/30 text-center space-y-0.5">
             <div className="text-[11px] text-slate-400">Đã đánh dấu hiểu</div>
             <div className="text-lg font-bold font-mono text-emerald-400">
-              {user.recentMistakes.filter((m) => m.isUnderstood).length}
+              {displayMistakes.filter((m) => m.isUnderstood).length}
             </div>
           </div>
         </div>
 
         {/* Top câu sai nhiều nhất */}
-        {user.recentMistakes.length > 0 && (
+        {displayMistakes.length > 0 && (
           <div className="space-y-2 pt-2 border-t border-slate-800/80">
             <div className="text-xs font-bold text-slate-300">
               Câu hỏi cần lưu ý khắc phục:
             </div>
             <div className="space-y-2">
-              {[...user.recentMistakes]
+              {[...displayMistakes]
                 .sort((a, b) => (b.mistakeCount || 1) - (a.mistakeCount || 1))
                 .slice(0, 2)
                 .map((m, idx) => (
